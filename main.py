@@ -67,6 +67,31 @@ async def create_event(info: Event):
     db.insert_one(event_dict)
     return {"status": "Event created successfully"}
 
+@app.get("/active_events")
+async def get_active_events():
+    db = Database.get_db().EventDetails
+    cursor = db.find(
+        {"event_sdate": {"$gte": date.today().isoformat()}},
+        {
+            "event_name": 1,
+            "event_sdate": 1,
+            "event_stime": 1,
+            "attendees": 1,
+            "_id": 0  
+        }
+    )
+    event_list = []
+    for event in cursor:
+        event_summary = {
+            "event_name": event.get("event_name"),
+            "event_sdate": event.get("event_sdate"),
+            "event_stime": event.get("event_stime"),
+            "attendees_count": len(event.get("attendees", []) or [])
+        }
+        event_list.append(event_summary)
+    return {"events": event_list}
+
+
 
 
 if __name__ == "__main__":
