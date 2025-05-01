@@ -89,12 +89,13 @@ async def get_active_events():
             "event_sdate": 1,
             "event_stime": 1,
             "attendees": 1,
-            "_id": 0  
+            "_id": 1 
         }
     )
     event_list = []
     for event in cursor:
         event_summary = {
+            "_id": str(event["_id"]),
             "event_name": event.get("event_name"),
             "event_sdate": event.get("event_sdate"),
             "event_stime": event.get("event_stime"),
@@ -113,12 +114,13 @@ async def get_past_events():
             "event_sdate": 1,
             "event_stime": 1,
             "attendees": 1,
-            "_id": 0
+            "_id": 1
         }
     )
     event_list = []
     for event in cursor:
         event_summary = {
+            "_id": str(event["_id"]),
             "event_name": event.get("event_name"),
             "event_sdate": event.get("event_sdate"),
             "event_stime": event.get("event_stime"),
@@ -266,7 +268,7 @@ async def register_attendance(
 
         try:
             embedding_list = user_embedding.tolist() if isinstance(user_embedding, np.ndarray) else user_embedding
-            SIMILARITY_THRESHOLD = 0.6
+            SIMILARITY_THRESHOLD = 0.7
             
             response = SupabaseDB.get_client().rpc(
                 'match_face_vector',
