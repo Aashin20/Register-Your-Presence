@@ -7,21 +7,34 @@ from typing import List, Optional
 from datetime import date, time
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from utils.db import Database #PostgresDB
+from utils.db import Database, SupabaseDB
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import UploadFile, File, Form, HTTPException
+import numpy as np
+from haversine import haversine, Unit
+from deepface import DeepFace
+import tempfile
+from bson import ObjectId
+import os
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Database.initialize()
-    #PostgresDB.initialize()
+    SupabaseDB.initialize()
     yield
     Database.close()
-    #PostgresDB.close()
+    SupabaseDB.close()
 
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "https://abcd.ngrok.io",
+        "http://192.168.1.10:3000",
+        "http://0.0.0.0",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,7 +60,6 @@ async def login(email: str, password: str, request: Request):
         return {"message": "Login successful"}
     else:
         return {"message": "Invalid credentials"}
-    
 
 @app.post("/create_event")
 async def create_event(info: Event):
@@ -91,7 +103,6 @@ async def get_active_events():
         event_list.append(event_summary)
     return {"events": event_list}
 
-
 @app.get("/past_events")
 async def get_past_events():
     db = Database.get_db().EventDetails
@@ -115,6 +126,7 @@ async def get_past_events():
         }
         event_list.append(event_summary)
     return {"events": event_list}
+
 
 
 if __name__ == "__main__":
