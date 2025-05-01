@@ -150,7 +150,204 @@ async def get_active_events_full():
         events.append(event)
     return {"events": events}
 
+@app.post("/register_attendance")
+async def register_attendance(
+    event_id: str = Form(...),
+    user_lat: float = Form(...),
+    user_lng: float = Form(...),
+    selfie: UploadFile = File(...)
+):
+    try:
+        import numpy as np
+        
+        if not selfie.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file must be an image"
+            )
 
+        try:
+            mongo_db = Database.get_db()
+            events_collection = mongo_db.EventDetails
+            
+            event = events_collection.find_one({
+                '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
+            })
+            
+            if not event:
+                raise HTTPException(status_code=404, detail="Event not found")
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while fetching event: {str(e)}"
+            )
+
+        try:
+            event_location = event.get("event_location", {})
+            
+            if (not event_location or 
+                event_location.get("type") != "Point" or 
+                not event_location.get("coordinates")):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid event location format in database"
+                )
+            
+            event_coords = event_location["coordinates"]
+            event_lng, event_lat = event_coords[0], event_coords[1]
+            
+            if not (-90 <= event_lat <= 90) or not (-180 <= event_lng <= 180):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Event coordinates out of valid range"
+                )
+            
+            if not (-90 <= user_lat <= 90) or not (-180 <= user_lng <= 180):
+                raise HTTPException(
+                    status_code=400,
+                    detail="User coordinates out of valid range"
+                )
+            
+            user_loc = (user_lat, user_lng)
+            event_loc = (event_lat, event_lng)
+            distance_m = haversine(user_loc, event_loc, unit=Unit.METERS)
+            
+            ATTENDANCE_RADIUS_METERS = 100
+            
+            if distance_m > ATTENDANCE_RADIUS_METERS:
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"You are {distance_m:.0f}m away from the event location. Must be within {ATTENDANCE_RADIUS_METERS}m."
+                )
+                
+            print(f"User is {distance_m:.0f}m away from event location")
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error in location validation: {str(e)}"
+            )
+
+        try:
+            temp_file_path = None
+            try:
+                content = await selfie.read()
+                
+                fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
+                with os.fdopen(fd, 'wb') as temp_file:
+                    temp_file.write(content)
+                
+                face_analysis = DeepFace.represent(
+                    img_path=temp_file_path,
+                    model_name="Facenet",
+                    enforce_detection=True
+                )
+                
+                if not face_analysis or len(face_analysis) == 0:
+                    raise ValueError("No face detected in the image")
+                
+                user_embedding = face_analysis[0]["embedding"]
+                
+            finally:
+                if temp_file_path and os.path.exists(temp_file_path):
+                    try:
+                        os.close(fd)
+                        os.unlink(temp_file_path)
+                    except:
+                        pass
+
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Face detection failed: {str(e)}"
+            )
+
+        try:
+            embedding_list = user_embedding.tolist() if isinstance(user_embedding, np.ndarray) else user_embedding
+            SIMILARITY_THRESHOLD = 0.6
+            
+            response = SupabaseDB.get_client().rpc(
+                'match_face_vector',
+                {
+                    'query_embedding': embedding_list,
+                    'similarity_threshold': SIMILARITY_THRESHOLD,
+                    'match_count': 1
+                }
+            ).execute()
+            
+            if not response.data or len(response.data) == 0:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Face not recognized as a registered user"
+                )
+            
+            match = response.data[0]
+            best_match = match['reg_no']
+            best_match_name = match['name']
+            similarity_score = match['distance']
+            
+            if similarity_score > SIMILARITY_THRESHOLD:
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Face not recognized with confidence (similarity score: {similarity_score:.2f})"
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error in face matching: {str(e)}"
+            )
+
+        try:
+            if 'attendees' in event and best_match in [a.get('reg_no') for a in event.get('attendees', [])]:
+                return {
+                    "status": "already_registered",
+                    "message": f"Attendance already registered for {best_match_name} at this event",
+                    "data": {
+                        "reg_no": best_match,
+                        "name": best_match_name,
+                        "similarity_score": f"{similarity_score:.4f}"
+                    }
+                }
+
+            update_result = events_collection.update_one(
+                {'_id': event['_id']},
+                {
+                    '$addToSet': {
+                        'attendees': {
+                            'reg_no': best_match,
+                            'name': best_match_name
+                        }
+                    }
+                }
+            )
+
+            if update_result.modified_count == 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to update attendance"
+                )
+
+            return {
+                "status": "success",
+                "message": f"Attendance registered successfully for {best_match_name}",
+                "data": {
+                    "reg_no": best_match,
+                    "name": best_match_name,
+                    "similarity_score": f"{similarity_score:.4f}"
+                }
+            }
+
+        except HTTPException:
+            raise
+    except Exception as e:
+        raise HTTPException(
+                status_code=500,
+                detail=f"Error recording attendance: {str(e)}"
+            )
 
 if __name__ == "__main__":
     import uvicorn
