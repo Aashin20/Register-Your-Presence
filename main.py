@@ -127,6 +127,29 @@ async def get_past_events():
         event_list.append(event_summary)
     return {"events": event_list}
 
+@app.get("/available_events")
+async def get_active_events_full():
+    db = Database.get_db().EventDetails
+    cursor = db.find(
+        {"event_sdate": {"$gte": date.today().isoformat()}},
+        {
+            "event_name": 1,
+            "event_desc": 1,
+            "event_location": 1, 
+            "event_sdate": 1,
+            "event_stime": 1,
+            "event_edate": 1,
+            "event_etime": 1,
+            "attendees": 1,
+        }
+    )
+    events = []
+    for event in cursor:
+        event["_id"] = str(event["_id"])
+        event["attendees"] = event.get("attendees") or []
+        events.append(event)
+    return {"events": events}
+
 
 
 if __name__ == "__main__":
