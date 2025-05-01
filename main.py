@@ -167,6 +167,33 @@ async def get_event_details(event_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching event details: {str(e)}")
 
+@app.get("/event/{event_id}/attendance/download")
+async def download_attendance(event_id: str):
+    try:
+        mongo_db = Database.get_db()
+        events_collection = mongo_db.EventDetails
+        event = events_collection.find_one({
+            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
+        })
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(['Registration No', 'Name', 'Timestamp'])
+        for attendee in event.get('attendees', []):
+            writer.writerow([
+                attendee.get('reg_no', ''),
+                attendee.get('name', ''),
+                attendee.get('timestamp', '')
+            ])
+        response = StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv"
+        )
+        response.headers["Content-Disposition"] = f"attachment; filename=attendance-{event_id}.csv"
+        return response
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading attendance: {str(e)}")
 
 @app.post("/register_attendance")
 async def register_attendance(
