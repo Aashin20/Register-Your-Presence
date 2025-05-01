@@ -28,14 +28,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://abcd.ngrok.io",
-        "http://192.168.1.10:3000",
-        "http://0.0.0.0",
-        "https://ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app/",
-        "https://ryp-frontend-nu.vercel.app/"
-    ],
+    allow_origin_regex=r"https://.*vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
