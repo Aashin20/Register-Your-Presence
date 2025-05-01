@@ -152,6 +152,21 @@ async def get_active_events_full():
         events.append(event)
     return {"events": events}
 
+@app.get("/event/{event_id}")
+async def get_event_details(event_id: str):
+    try:
+        mongo_db = Database.get_db()
+        events_collection = mongo_db.EventDetails
+        event = events_collection.find_one({
+            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
+        })
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        event['_id'] = str(event['_id'])
+        return event
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching event details: {str(e)}")
+
 
 @app.post("/register_attendance")
 async def register_attendance(
