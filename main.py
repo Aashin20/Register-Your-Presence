@@ -296,14 +296,56 @@ async def get_event_details(event_id: str):
     try:
         mongo_db = Database.get_db()
         events_collection = mongo_db.EventDetails
-        event = events_collection.find_one({
-            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
-        })
+        
+        # More robust ObjectId handling
+        try:
+            if len(event_id) == 24:
+                # Try to convert to ObjectId
+                id_query = ObjectId(event_id)
+            else:
+                # Use as string
+                id_query = event_id
+                
+            # Log the query being attempted
+            logger.info(f"Querying for event with ID: {id_query}")
+            
+        except Exception as id_error:
+            # If ObjectId conversion fails, try as string
+            logger.warning(f"Failed to convert to ObjectId: {str(id_error)}, using as string")
+            id_query = event_id
+        
+        # Try multiple query approaches - first with ObjectId if possible
+        event = None
+        if len(event_id) == 24:
+            try:
+                event = events_collection.find_one({'_id': ObjectId(event_id)})
+            except Exception:
+                pass
+                
+        # If not found, try with string ID
         if not event:
-            raise HTTPException(status_code=404, detail="Event not found")
+            event = events_collection.find_one({'_id': event_id})
+            
+        # If still not found, try case-insensitive search
+        if not event:
+            event = events_collection.find_one({'_id': {'$regex': f'^{event_id}$', '$options': 'i'}})
+        
+        # Final check
+        if not event:
+            logger.error(f"Event not found with ID: {event_id}")
+            raise HTTPException(status_code=404, detail=f"Event not found with ID: {event_id}")
+        
+        # Convert ObjectId to string for JSON serialization
         event['_id'] = str(event['_id'])
         return event
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
+        # Log the full error with traceback
+        import traceback
+        logger.error(f"Error fetching event: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Error fetching event details: {str(e)}")
 
 @app.get("/event/{event_id}/attendance/download")
