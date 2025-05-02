@@ -30,7 +30,6 @@ class ModelManager:
     _instance = None
     _model = None
     _initialized = False
-    _model_weights = None
 
     @classmethod
     def get_instance(cls):
@@ -43,33 +42,10 @@ class ModelManager:
         if not self._initialized:
             logger.info("Initializing DeepFace model...")
             try:
-                # Set DeepFace home directory
-                os.environ["DEEPFACE_HOME"] = "/opt/render/.deepface"
-                
-                # Force model download and initialization during startup
+                os.makedirs(os.environ["DEEPFACE_HOME"], exist_ok=True)
                 self._model = DeepFace
-                
-                # Create a dummy image for initialization
-                import numpy as np
-                from PIL import Image
-                dummy_img = Image.fromarray(np.zeros((112, 112, 3), dtype=np.uint8))
-                dummy_path = "dummy.jpg"
-                dummy_img.save(dummy_path)
-                
-                try:
-                    # Force model loading with minimal computation
-                    _ = self._model.represent(
-                        img_path=dummy_path,
-                        model_name="Facenet",
-                        detector_backend='opencv',
-                        enforce_detection=False
-                    )
-                    self._initialized = True
-                    logger.info("DeepFace model initialized successfully")
-                finally:
-                    if os.path.exists(dummy_path):
-                        os.remove(dummy_path)
-                        
+                self._initialized = True
+                logger.info("DeepFace model initialized successfully")
             except Exception as e:
                 logger.error(f"Error initializing model: {str(e)}")
                 raise
@@ -79,6 +55,19 @@ class ModelManager:
         if not self._initialized:
             self.initialize()
         return self._model
+
+    @staticmethod
+    def convert_to_list(embedding):
+        """Convert embedding to list format regardless of input type"""
+        if isinstance(embedding, np.ndarray):
+            return embedding.tolist()
+        elif isinstance(embedding, list):
+            return embedding
+        elif isinstance(embedding, (float, np.float32, np.float64)):
+            # For single float values, create a list with that value
+            return [float(embedding)]
+        else:
+            raise ValueError(f"Unexpected embedding type: {type(embedding)}")
 
     @staticmethod
     async def analyze_face(image_path):
@@ -98,7 +87,9 @@ class ModelManager:
                     align=True
                 )
                 if result and len(result) > 0:
-                    return result[0]
+                    # Convert the embedding to the correct format
+                    embedding = result[0]
+                    return ModelManager.convert_to_list(embedding)
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Backend {backend} failed: {str(e)}")
@@ -307,8 +298,7 @@ async def register_attendance(
     user_lng: float = Form(...),
     selfie: UploadFile = File(...)
 ):
-    try:
-        # Validate file type
+    try:        # Validate file type
         if not selfie.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="Uploaded file must be an image")
 
@@ -355,14 +345,19 @@ async def register_attendance(
             with os.fdopen(fd, 'wb') as temp_file:
                 temp_file.write(content)
 
-            face_data = await ModelManager.analyze_face(temp_file_path)
-            if not face_data:
-                raise HTTPException(status_code=400, detail="No face detected in the image")
-
-            embedding = face_data if isinstance(face_data, list) else face_data.tolist()
+            # Get face embedding
+            embedding = await ModelManager.analyze_face(temp_file_path)
+            if not embedding:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No face detected in the image"
+                )
 
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Face detection failed: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Face detection failed: {str(e)}"
+            )
         finally:
             if temp_file_path and os.path.exists(temp_file_path):
                 try:
@@ -370,17 +365,18 @@ async def register_attendance(
                 except Exception as e:
                     logger.error(f"Error removing temporary file: {str(e)}")
 
-        # Face matching
+        # Match face with database
         try:
             SIMILARITY_THRESHOLD = 0.8
             response = SupabaseDB.get_client().rpc(
                 'match_face_vector',
                 {
-                    'query_embedding': embedding,
+                    'query_embedding': embedding,  # embedding is already in list format
                     'similarity_threshold': SIMILARITY_THRESHOLD,
                     'match_count': 1
                 }
             ).execute()
+
 
             if not response.data or len(response.data) == 0:
                 raise HTTPException(status_code=401, detail="Face not recognized as a registered user")
@@ -443,12 +439,18 @@ async def register_attendance(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error in face matching: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error in face matching: {str(e)}"
+            )
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
