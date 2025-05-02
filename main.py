@@ -384,91 +384,113 @@ async def process_face_async(
     event_id: str,
     user_lat: float,
     user_lng: float,
+    reg_no: str,
     temp_file_path: str,
     event: Dict[str, Any]
 ):
     try:
-        # Face detection
-        embedding = await ModelManager.analyze_face(temp_file_path)
-        if not embedding:
-            logger.warning("No face detected in the image")
-            return None, "No face detected in the image"
+        logger.info(f"Processing attendance for reg_no: {reg_no}")
         
-        # Match face with database
-        response = SupabaseDB.get_client().rpc(
-            'match_face_vector',
-            {
-                'query_embedding': embedding,
-                'similarity_threshold': SIMILARITY_THRESHOLD,
-                'match_count': 1
-            }
-        ).execute()
+        # Check if user exists in database
+        user_data = SupabaseDB.get_client().table('users') \
+            .select('*') \
+            .eq('reg_no', reg_no) \
+            .execute()
+        
+        if not user_data.data or len(user_data.data) == 0:
+            logger.warning(f"No user found with reg_no: {reg_no}")
+            return None, f"No user found with registration number {reg_no}"
 
-        if not response.data or len(response.data) == 0:
-            return None, "Face not recognized as a registered user"
-
-        match = response.data[0]
-        best_match = match['reg_no']
-        best_match_name = match['name']
-        similarity_score = match['distance']
-
-        if similarity_score > SIMILARITY_THRESHOLD:
-            return None, f"Face not recognized with sufficient confidence (score: {similarity_score:.2f})"
+        user = user_data.data[0]
+        stored_embedding = user.get('face_embedding')
+        
+        if not stored_embedding:
+            logger.warning(f"No face data found for reg_no: {reg_no}")
+            return None, f"No face data found for registration number {reg_no}"
 
         # Check for duplicate attendance
         attendees = event.get('attendees', [])
         if attendees and any(
             isinstance(attendee, dict) and 
-            attendee.get('reg_no') == best_match 
+            attendee.get('reg_no') == reg_no 
             for attendee in attendees
         ):
+            logger.info(f"Duplicate attendance detected for reg_no: {reg_no}")
             return {
                 "status": "already_registered",
-                "message": f"Attendance already registered for {best_match_name}",
+                "message": f"Attendance already registered for {user['name']}",
                 "data": {
-                    "reg_no": best_match,
-                    "name": best_match_name,
-                    "similarity_score": f"{similarity_score:.4f}"
+                    "reg_no": reg_no,
+                    "name": user['name']
                 }
             }, None
 
-        # Update attendance
-        mongo_db = Database.get_db()
-        events_collection = mongo_db.EventDetails
-        update_result = events_collection.update_one(
-            {'_id': event['_id']},
-            {
-                '$addToSet': {
-                    'attendees': {
-                        'reg_no': best_match,
-                        'name': best_match_name,
-                        'timestamp': datetime.datetime.now().isoformat()
-                    }
+        # Process the selfie
+        try:
+            logger.info("Analyzing uploaded selfie...")
+            new_embedding = await ModelManager.analyze_face(temp_file_path)
+            
+            if not new_embedding:
+                return None, "No face detected in the selfie"
+
+            # Convert embeddings to numpy arrays for comparison
+            stored_np = np.array(stored_embedding)
+            new_np = np.array(new_embedding)
+            
+            # Calculate cosine similarity
+            similarity_score = 1 - (np.dot(stored_np, new_np) / 
+                                 (np.linalg.norm(stored_np) * np.linalg.norm(new_np)))
+            
+            logger.info(f"Face similarity score: {similarity_score:.4f}")
+
+            if similarity_score > SIMILARITY_THRESHOLD:
+                return None, f"Face verification failed. Score: {similarity_score:.2f}"
+
+            # Update attendance in database
+            mongo_db = Database.get_db()
+            events_collection = mongo_db.EventDetails
+            
+            attendance_record = {
+                'reg_no': reg_no,
+                'name': user['name'],
+                'timestamp': datetime.datetime.now().isoformat(),
+                'verification_score': float(similarity_score)
+            }
+            
+            update_result = events_collection.update_one(
+                {'_id': event['_id']},
+                {'$addToSet': {'attendees': attendance_record}}
+            )
+
+            if update_result.modified_count == 0:
+                logger.error("Failed to update attendance record")
+                return None, "Failed to update attendance"
+
+            logger.info(f"Successfully registered attendance for reg_no: {reg_no}")
+            return {
+                "status": "success",
+                "message": f"Attendance registered successfully for {user['name']}",
+                "data": {
+                    "reg_no": reg_no,
+                    "name": user['name'],
+                    "similarity_score": f"{similarity_score:.4f}",
+                    "timestamp": attendance_record['timestamp']
                 }
-            }
-        )
+            }, None
 
-        if update_result.modified_count == 0:
-            return None, "Failed to update attendance"
-
-        return {
-            "status": "success",
-            "message": f"Attendance registered successfully for {best_match_name}",
-            "data": {
-                "reg_no": best_match,
-                "name": best_match_name,
-                "similarity_score": f"{similarity_score:.4f}"
-            }
-        }, None
+        except Exception as face_error:
+            logger.error(f"Error processing face: {str(face_error)}")
+            return None, f"Error processing face: {str(face_error)}"
 
     except Exception as e:
         logger.error(f"Error in face processing: {str(e)}")
         return None, f"Error in face processing: {str(e)}"
     finally:
-        # Clean up temporary file
+        # Cleanup temporary file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)
+                logger.info("Temporary file cleaned up")
             except Exception as e:
                 logger.error(f"Error removing temporary file: {str(e)}")
 
@@ -476,43 +498,61 @@ async def process_face_async(
 async def register_attendance(
     background_tasks: BackgroundTasks,
     event_id: str = Form(...),
+    reg_no: str = Form(...),
     user_lat: float = Form(...),
     user_lng: float = Form(...),
     selfie: UploadFile = File(...)
 ):
     try:
-        # Validate file type
+        logger.info(f"Received attendance registration request for event: {event_id}, reg_no: {reg_no}")
+        
+        # Input validation
+        if not reg_no or not reg_no.strip():
+            raise HTTPException(status_code=400, detail="Registration number is required")
+        
         if not selfie.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="Uploaded file must be an image")
         
-        # Validate file size (prevent large uploads)
+        # Read and validate file size
         content = await selfie.read(MAX_IMAGE_SIZE + 1)
         if len(content) > MAX_IMAGE_SIZE:
-            raise HTTPException(status_code=400, detail=f"Image too large. Maximum size is {MAX_IMAGE_SIZE/1024/1024}MB")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Image too large. Maximum size is {MAX_IMAGE_SIZE/1024/1024}MB"
+            )
 
-        # Get event details and validate
+        # Get event details
         mongo_db = Database.get_db()
         events_collection = mongo_db.EventDetails
-        event = events_collection.find_one({
-            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
-        })
+        
+        try:
+            event_query_id = ObjectId(event_id) if len(event_id) == 24 else event_id
+            event = events_collection.find_one({'_id': event_query_id})
+        except Exception as e:
+            logger.error(f"Error querying event: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid event ID format")
+
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
 
-        # Location validation
+        # Validate event location
         event_location = event.get("event_location", {})
-        if not event_location or event_location.get("type") != "Point" or not event_location.get("coordinates"):
+        if not event_location or \
+           event_location.get("type") != "Point" or \
+           not event_location.get("coordinates"):
             raise HTTPException(status_code=400, detail="Invalid event location format")
 
+        # Extract coordinates and calculate distance
         event_coords = event_location["coordinates"]
         event_lng, event_lat = event_coords[0], event_coords[1]
 
-        # Distance calculation
         distance_m = haversine(
             (user_lat, user_lng),
             (event_lat, event_lng),
             unit=Unit.METERS
         )
+        
+        logger.info(f"User distance from event: {distance_m:.2f}m")
         
         if distance_m > ATTENDANCE_RADIUS_METERS:
             raise HTTPException(
@@ -520,16 +560,22 @@ async def register_attendance(
                 detail=f"You are {distance_m:.0f}m away from the event location. Must be within {ATTENDANCE_RADIUS_METERS}m."
             )
 
-        # Create a temporary file for face analysis
+        # Create temporary file for face processing
         fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
-        with os.fdopen(fd, 'wb') as temp_file:
-            temp_file.write(content)
-        
-        # Process face asynchronously with timeout
         try:
-            # Schedule immediate face processing
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(content)
+            
+            # Process face with timeout
             result, error = await asyncio.wait_for(
-                process_face_async(event_id, user_lat, user_lng, temp_file_path, event),
+                process_face_async(
+                    event_id,
+                    user_lat,
+                    user_lng,
+                    reg_no,
+                    temp_file_path,
+                    event
+                ),
                 timeout=FACE_DETECTION_TIMEOUT
             )
             
@@ -539,20 +585,37 @@ async def register_attendance(
             return result
             
         except asyncio.TimeoutError:
-            # If processing takes too long, run it in the background
-            # and return a pending status
+            logger.warning("Face processing timeout, switching to background processing")
+            # If processing takes too long, switch to background processing
             background_tasks.add_task(
-                process_face_async, event_id, user_lat, user_lng, temp_file_path, event
+                process_face_async,
+                event_id,
+                user_lat,
+                user_lng,
+                reg_no,
+                temp_file_path,
+                event
             )
             
             return {
                 "status": "processing",
-                "message": "Your attendance is being processed. Please check back in a few moments."
+                "message": "Your attendance is being processed. Please check back in a few moments.",
+                "data": {
+                    "reg_no": reg_no,
+                    "check_url": f"/attendance_status/{event_id}/{reg_no}"
+                }
             }
+            
+        except Exception as e:
+            logger.error(f"Error during face processing: {str(e)}")
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            raise HTTPException(status_code=400, detail=str(e))
         
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
