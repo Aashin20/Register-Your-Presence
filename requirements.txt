@@ -12,3 +12,4 @@ pillow
 python-jose[cryptography]
 pymongo
 supabase
+python-dotenv
