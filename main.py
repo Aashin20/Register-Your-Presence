@@ -17,8 +17,8 @@ import csv
 import io
 import tensorflow as tf
 
-global model
-model=None
+#lobal model
+#odel=None
 
 
 
@@ -26,7 +26,7 @@ model=None
 async def lifespan(app: FastAPI):
     Database.initialize()
     SupabaseDB.initialize()
-    model = DeepFace.build_model('Facenet')
+    #mdel = DeepFace.build_model('Facenet')
     yield
     Database.close()
     SupabaseDB.close()
