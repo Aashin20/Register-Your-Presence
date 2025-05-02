@@ -3,8 +3,8 @@ uvicorn
 python-multipart
 numpy
 haversine
-deepface==0.0.75
-tensorflow==2.13.0
+deepface
+tensorflow
 opencv-python-headless
 retina-face
 mtcnn
