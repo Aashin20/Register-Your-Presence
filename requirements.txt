@@ -9,3 +9,7 @@ supabase
 uvicorn
 tf-keras
 python-multipart
+opencv-python-headless
+tensorflow
+retina-face
+mtcnn
