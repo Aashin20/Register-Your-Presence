@@ -15,11 +15,19 @@ import os
 import datetime
 import csv
 import io
+from deepface.basemodels import Facenet
+import tensorflow as tf
+
+model = None
+
+
+model = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Database.initialize()
     SupabaseDB.initialize()
+    model = Facenet.loadModel()
     yield
     Database.close()
     SupabaseDB.close()
@@ -268,6 +276,7 @@ async def register_attendance(
                 face_analysis = DeepFace.represent(
                     img_path=temp_file_path,
                     model_name="Facenet",
+                    model=model,
                     enforce_detection=True
                 )
                 if not face_analysis or len(face_analysis) == 0:
