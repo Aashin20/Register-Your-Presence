@@ -391,8 +391,8 @@ async def process_face_async(
     try:
         logger.info(f"Processing attendance for reg_no: {reg_no}")
         
-        # Check if user exists in database
-        user_data = SupabaseDB.get_client().table('users') \
+        # Check if user exists in face_embeddings table
+        user_data = SupabaseDB.get_client().table('face_embeddings') \
             .select('*') \
             .eq('reg_no', reg_no) \
             .execute()
@@ -402,7 +402,7 @@ async def process_face_async(
             return None, f"No user found with registration number {reg_no}"
 
         user = user_data.data[0]
-        stored_embedding = user.get('face_embedding')
+        stored_embedding = user.get('embedding')  # Use 'embedding' instead of 'face_embedding'
         
         if not stored_embedding:
             logger.warning(f"No face data found for reg_no: {reg_no}")
@@ -439,7 +439,7 @@ async def process_face_async(
             
             # Calculate cosine similarity
             similarity_score = 1 - (np.dot(stored_np, new_np) / 
-                                 (np.linalg.norm(stored_np) * np.linalg.norm(new_np)))
+                               (np.linalg.norm(stored_np) * np.linalg.norm(new_np)))
             
             logger.info(f"Face similarity score: {similarity_score:.4f}")
 
@@ -494,6 +494,30 @@ async def process_face_async(
             except Exception as e:
                 logger.error(f"Error removing temporary file: {str(e)}")
 
+@app.get("/verify_registration/{reg_no}")
+async def verify_registration(reg_no: str):
+    try:
+        user_data = SupabaseDB.get_client().table('face_embeddings') \
+            .select('reg_no,name') \
+            .eq('reg_no', reg_no) \
+            .execute()
+        
+        is_valid = bool(user_data.data and len(user_data.data) > 0)
+        
+        if is_valid:
+            return {
+                "valid": True,
+                "name": user_data.data[0].get('name')
+            }
+        return {"valid": False}
+        
+    except Exception as e:
+        logger.error(f"Error verifying registration: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Error verifying registration number"
+        )
+        
 @app.post("/register_attendance")
 async def register_attendance(
     background_tasks: BackgroundTasks,
