@@ -287,7 +287,7 @@ async def register_attendance(
             )
         try:
             embedding_list = user_embedding.tolist() if isinstance(user_embedding, np.ndarray) else user_embedding
-            SIMILARITY_THRESHOLD = 0.6
+            SIMILARITY_THRESHOLD = 0.8
             response = SupabaseDB.get_client().rpc(
                 'match_face_vector',
                 {
