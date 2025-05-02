@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from contextlib import asynccontextmanager
 from utils.db import Database, SupabaseDB
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Union
 from datetime import date, time
 import numpy as np
 from haversine import haversine, Unit
@@ -16,20 +16,34 @@ import datetime
 import csv
 import io
 import logging
+import asyncio
 from pathlib import Path
 import tensorflow as tf
+from functools import lru_cache
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure TensorFlow to be less verbose
+# Configure TensorFlow to be less verbose and limit memory growth
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+tf_config = tf.compat.v1.ConfigProto()
+tf_config.gpu_options.allow_growth = True
+tf_config.gpu_options.per_process_gpu_memory_fraction = 0.5  # Limit GPU memory usage
+tf_session = tf.compat.v1.Session(config=tf_config)
+tf.compat.v1.keras.backend.set_session(tf_session)
+
+# Constants
+MAX_IMAGE_SIZE = 1024 * 1024 * 5  # 5MB
+FACE_DETECTION_TIMEOUT = 30  # 30 seconds
+ATTENDANCE_RADIUS_METERS = 100
+SIMILARITY_THRESHOLD = 0.8
 
 class ModelManager:
     _instance = None
     _model = None
     _initialized = False
+    _preferred_backend = 'retinaface'  # Set a single preferred backend
 
     @classmethod
     def get_instance(cls):
@@ -38,11 +52,14 @@ class ModelManager:
         return cls._instance
 
     def initialize(self):
-        """Initialize the model during server startup"""
+        """Initialize the model during server startup, but with memory optimizations"""
         if not self._initialized:
             logger.info("Initializing DeepFace model...")
             try:
-                os.makedirs(os.environ["DEEPFACE_HOME"], exist_ok=True)
+                # Make sure the directory exists
+                os.makedirs(os.environ.get("DEEPFACE_HOME", "./deepface_models"), exist_ok=True)
+                
+                # Just store the reference, don't preload any models
                 self._model = DeepFace
                 self._initialized = True
                 logger.info("DeepFace model initialized successfully")
@@ -74,35 +91,58 @@ class ModelManager:
         model_manager = ModelManager.get_instance()
         model = model_manager.get_model()
         
-        backends = ['opencv', 'retinaface', 'mtcnn', 'ssd']
-        last_error = None
-        
-        for backend in backends:
-            try:
-                result = model.represent(
+        # Use a single preferred backend with a timeout
+        try:
+            # Run in a separate thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: model.represent(
                     img_path=image_path,
                     model_name="Facenet",
-                    detector_backend=backend,
+                    detector_backend=ModelManager._preferred_backend,
                     enforce_detection=True,
                     align=True
                 )
+            )
+            
+            if result and len(result) > 0:
+                # Convert the embedding to the correct format
+                embedding = result[0]
+                return ModelManager.convert_to_list(embedding)
+            
+            raise ValueError("No face detected in the image")
+        
+        except Exception as e:
+            # If the preferred backend fails, try a fallback
+            try:
+                logger.warning(f"Preferred backend failed: {str(e)}, trying fallback")
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: model.represent(
+                        img_path=image_path,
+                        model_name="Facenet",
+                        detector_backend="opencv",  # Fallback to opencv
+                        enforce_detection=True,
+                        align=True
+                    )
+                )
+                
                 if result and len(result) > 0:
                     # Convert the embedding to the correct format
                     embedding = result[0]
                     return ModelManager.convert_to_list(embedding)
-            except Exception as e:
-                last_error = str(e)
-                logger.warning(f"Backend {backend} failed: {str(e)}")
-                continue
-        
-        raise ValueError(f"All face detection backends failed. Last error: {last_error}")
+            except Exception as fallback_error:
+                logger.error(f"Fallback detection failed: {str(fallback_error)}")
+                
+            raise ValueError(f"Face detection failed: {str(e)}")
 
 # Initialize ModelManager at the module level
 model_manager = ModelManager.get_instance()
 
 class GeoLocation(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
 
 class Event(BaseModel):
     event_name: str
@@ -112,14 +152,14 @@ class Event(BaseModel):
     event_stime: time
     event_edate: date
     event_etime: time
-    attendees: Optional[List[str]] = None
+    attendees: Optional[List[Dict[str, str]]] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the FastAPI application"""
     logger.info("Starting up server...")
     try:
-        # Initialize model during startup
+        # Initialize model during startup - but don't preload everything
         logger.info("Initializing model...")
         model_manager.initialize()
         logger.info("Model initialization complete")
@@ -132,8 +172,11 @@ async def lifespan(app: FastAPI):
         
     finally:
         logger.info("Shutting down server...")
+        # Clean up resources
         Database.close()
         SupabaseDB.close()
+        # Clean up TensorFlow session
+        tf.keras.backend.clear_session()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -291,16 +334,116 @@ async def download_attendance(event_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading attendance: {str(e)}")
 
+# Background task for face processing
+async def process_face_async(
+    event_id: str,
+    user_lat: float,
+    user_lng: float,
+    temp_file_path: str,
+    event: Dict[str, Any]
+):
+    try:
+        # Face detection
+        embedding = await ModelManager.analyze_face(temp_file_path)
+        if not embedding:
+            logger.warning("No face detected in the image")
+            return None, "No face detected in the image"
+        
+        # Match face with database
+        response = SupabaseDB.get_client().rpc(
+            'match_face_vector',
+            {
+                'query_embedding': embedding,
+                'similarity_threshold': SIMILARITY_THRESHOLD,
+                'match_count': 1
+            }
+        ).execute()
+
+        if not response.data or len(response.data) == 0:
+            return None, "Face not recognized as a registered user"
+
+        match = response.data[0]
+        best_match = match['reg_no']
+        best_match_name = match['name']
+        similarity_score = match['distance']
+
+        if similarity_score > SIMILARITY_THRESHOLD:
+            return None, f"Face not recognized with sufficient confidence (score: {similarity_score:.2f})"
+
+        # Check for duplicate attendance
+        attendees = event.get('attendees', [])
+        if attendees and any(
+            isinstance(attendee, dict) and 
+            attendee.get('reg_no') == best_match 
+            for attendee in attendees
+        ):
+            return {
+                "status": "already_registered",
+                "message": f"Attendance already registered for {best_match_name}",
+                "data": {
+                    "reg_no": best_match,
+                    "name": best_match_name,
+                    "similarity_score": f"{similarity_score:.4f}"
+                }
+            }, None
+
+        # Update attendance
+        mongo_db = Database.get_db()
+        events_collection = mongo_db.EventDetails
+        update_result = events_collection.update_one(
+            {'_id': event['_id']},
+            {
+                '$addToSet': {
+                    'attendees': {
+                        'reg_no': best_match,
+                        'name': best_match_name,
+                        'timestamp': datetime.datetime.now().isoformat()
+                    }
+                }
+            }
+        )
+
+        if update_result.modified_count == 0:
+            return None, "Failed to update attendance"
+
+        return {
+            "status": "success",
+            "message": f"Attendance registered successfully for {best_match_name}",
+            "data": {
+                "reg_no": best_match,
+                "name": best_match_name,
+                "similarity_score": f"{similarity_score:.4f}"
+            }
+        }, None
+
+    except Exception as e:
+        logger.error(f"Error in face processing: {str(e)}")
+        return None, f"Error in face processing: {str(e)}"
+    finally:
+        # Clean up temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception as e:
+                logger.error(f"Error removing temporary file: {str(e)}")
+
 @app.post("/register_attendance")
 async def register_attendance(
+    background_tasks: BackgroundTasks,
     event_id: str = Form(...),
     user_lat: float = Form(...),
     user_lng: float = Form(...),
     selfie: UploadFile = File(...)
 ):
-    try:        # Validate file type
+    try:
+        # Validate file type
         if not selfie.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+        
+        # Validate file size (prevent large uploads)
+        content = await selfie.read(MAX_IMAGE_SIZE + 1)
+        if len(content) > MAX_IMAGE_SIZE:
+            raise HTTPException(status_code=400, detail=f"Image too large. Maximum size is {MAX_IMAGE_SIZE/1024/1024}MB")
 
         # Get event details and validate
         mongo_db = Database.get_db()
@@ -319,10 +462,6 @@ async def register_attendance(
         event_coords = event_location["coordinates"]
         event_lng, event_lat = event_coords[0], event_coords[1]
 
-        if not all(-90 <= x <= 90 for x in [event_lat, user_lat]) or \
-           not all(-180 <= x <= 180 for x in [event_lng, user_lng]):
-            raise HTTPException(status_code=400, detail="Coordinates out of valid range")
-
         # Distance calculation
         distance_m = haversine(
             (user_lat, user_lng),
@@ -330,120 +469,42 @@ async def register_attendance(
             unit=Unit.METERS
         )
         
-        ATTENDANCE_RADIUS_METERS = 100
         if distance_m > ATTENDANCE_RADIUS_METERS:
             raise HTTPException(
                 status_code=400,
                 detail=f"You are {distance_m:.0f}m away from the event location. Must be within {ATTENDANCE_RADIUS_METERS}m."
             )
 
-        # Face detection
-        temp_file_path = None
+        # Create a temporary file for face analysis
+        fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
+        with os.fdopen(fd, 'wb') as temp_file:
+            temp_file.write(content)
+        
+        # Process face asynchronously with timeout
         try:
-            content = await selfie.read()
-            fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
-            with os.fdopen(fd, 'wb') as temp_file:
-                temp_file.write(content)
-
-            # Get face embedding
-            embedding = await ModelManager.analyze_face(temp_file_path)
-            if not embedding:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No face detected in the image"
-                )
-
-        except Exception as e:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Face detection failed: {str(e)}"
+            # Schedule immediate face processing
+            result, error = await asyncio.wait_for(
+                process_face_async(event_id, user_lat, user_lng, temp_file_path, event),
+                timeout=FACE_DETECTION_TIMEOUT
             )
-        finally:
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    logger.error(f"Error removing temporary file: {str(e)}")
-
-        # Match face with database
-        try:
-            SIMILARITY_THRESHOLD = 0.8
-            response = SupabaseDB.get_client().rpc(
-                'match_face_vector',
-                {
-                    'query_embedding': embedding,  # embedding is already in list format
-                    'similarity_threshold': SIMILARITY_THRESHOLD,
-                    'match_count': 1
-                }
-            ).execute()
-
-
-            if not response.data or len(response.data) == 0:
-                raise HTTPException(status_code=401, detail="Face not recognized as a registered user")
-
-            match = response.data[0]
-            best_match = match['reg_no']
-            best_match_name = match['name']
-            similarity_score = match['distance']
-
-            if similarity_score > SIMILARITY_THRESHOLD:
-                raise HTTPException(
-                    status_code=401,
-                    detail=f"Face not recognized with sufficient confidence (score: {similarity_score:.2f})"
-                )
-
-            # Check for duplicate attendance
-            attendees = event.get('attendees', [])
-            if attendees and any(
-                isinstance(attendee, dict) and 
-                attendee.get('reg_no') == best_match 
-                for attendee in attendees
-            ):
-                return {
-                    "status": "already_registered",
-                    "message": f"Attendance already registered for {best_match_name}",
-                    "data": {
-                        "reg_no": best_match,
-                        "name": best_match_name,
-                        "similarity_score": f"{similarity_score:.4f}"
-                    }
-                }
-
-            # Update attendance
-            update_result = events_collection.update_one(
-                {'_id': event['_id']},
-                {
-                    '$addToSet': {
-                        'attendees': {
-                            'reg_no': best_match,
-                            'name': best_match_name,
-                            'timestamp': datetime.datetime.now().isoformat()
-                        }
-                    }
-                }
+            
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+            
+            return result
+            
+        except asyncio.TimeoutError:
+            # If processing takes too long, run it in the background
+            # and return a pending status
+            background_tasks.add_task(
+                process_face_async, event_id, user_lat, user_lng, temp_file_path, event
             )
-
-            if update_result.modified_count == 0:
-                raise HTTPException(status_code=500, detail="Failed to update attendance")
-
+            
             return {
-                "status": "success",
-                "message": f"Attendance registered successfully for {best_match_name}",
-                "data": {
-                    "reg_no": best_match,
-                    "name": best_match_name,
-                    "similarity_score": f"{similarity_score:.4f}"
-                }
+                "status": "processing",
+                "message": "Your attendance is being processed. Please check back in a few moments."
             }
-
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error in face matching: {str(e)}"
-            )
-
+        
     except HTTPException:
         raise
     except Exception as e:
@@ -452,6 +513,45 @@ async def register_attendance(
             detail=f"Internal server error: {str(e)}"
         )
 
+# Endpoint to check the status of a pending attendance
+@app.get("/attendance_status/{event_id}/{reg_no}")
+async def check_attendance_status(event_id: str, reg_no: str):
+    try:
+        mongo_db = Database.get_db()
+        events_collection = mongo_db.EventDetails
+        event = events_collection.find_one({
+            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
+        })
+        
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        attendees = event.get('attendees', [])
+        for attendee in attendees:
+            if attendee.get('reg_no') == reg_no:
+                return {
+                    "status": "registered",
+                    "message": f"Attendance confirmed for {attendee.get('name')}",
+                    "data": {
+                        "reg_no": reg_no,
+                        "name": attendee.get('name'),
+                        "timestamp": attendee.get('timestamp')
+                    }
+                }
+        
+        return {
+            "status": "pending",
+            "message": "Attendance not yet registered for this user."
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error checking attendance status: {str(e)}")
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.datetime.now().isoformat()}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="debug")
+    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="info")
