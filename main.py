@@ -203,7 +203,10 @@ async def create_event(info: Event):
     exists = db.find_one({"event_name": info.event_name})
     if exists:
         return {"status": "Event already exists"}
-    event_dict = info.model_dump()
+    
+    # Change from model_dump() to dict() for Pydantic v1 compatibility
+    event_dict = info.dict()
+    
     for field in ['event_sdate', 'event_edate']:
         event_dict[field] = event_dict[field].isoformat()
     for field in ['event_stime', 'event_etime']:
