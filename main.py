@@ -15,19 +15,18 @@ import os
 import datetime
 import csv
 import io
-from deepface.basemodels import Facenet
 import tensorflow as tf
 
-model = None
+global model
+model=None
 
 
-model = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Database.initialize()
     SupabaseDB.initialize()
-    model = Facenet.loadModel()
+    model = DeepFace.build_model('Facenet')
     yield
     Database.close()
     SupabaseDB.close()
