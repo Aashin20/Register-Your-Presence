@@ -18,7 +18,7 @@ import io
 import tensorflow as tf
 
 #lobal model
-#odel=None
+model=None
 
 
 
