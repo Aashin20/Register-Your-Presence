@@ -273,58 +273,32 @@ async def register_attendance(
                 fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
                 with os.fdopen(fd, 'wb') as temp_file:
                     temp_file.write(content)
+                
+                # Updated face detection code
                 face_analysis = DeepFace.represent(
                     img_path=temp_file_path,
                     model_name="Facenet",
-                    model=model,
-                    enforce_detection=True
+                    detector_backend='retinaface',  # or 'opencv', 'mtcnn', 'ssd'
+                    enforce_detection=True,
+                    align=True
                 )
+                
                 if not face_analysis or len(face_analysis) == 0:
                     raise ValueError("No face detected in the image")
-                user_embedding = face_analysis[0]["embedding"]
+                
+                user_embedding = face_analysis[0]  # The embedding is directly returned
+                
             finally:
                 if temp_file_path and os.path.exists(temp_file_path):
                     try:
-                        os.close(fd)
-                        os.unlink(temp_file_path)
+                        os.remove(temp_file_path)
                     except:
                         pass
+
         except Exception as e:
             raise HTTPException(
                 status_code=400,
                 detail=f"Face detection failed: {str(e)}"
-            )
-        try:
-            embedding_list = user_embedding.tolist() if isinstance(user_embedding, np.ndarray) else user_embedding
-            SIMILARITY_THRESHOLD = 0.8
-            response = SupabaseDB.get_client().rpc(
-                'match_face_vector',
-                {
-                    'query_embedding': embedding_list,
-                    'similarity_threshold': SIMILARITY_THRESHOLD,
-                    'match_count': 1
-                }
-            ).execute()
-            if not response.data or len(response.data) == 0:
-                raise HTTPException(
-                    status_code=401,
-                    detail="Face not recognized as a registered user"
-                )
-            match = response.data[0]
-            best_match = match['reg_no']
-            best_match_name = match['name']
-            similarity_score = match['distance']
-            if similarity_score > SIMILARITY_THRESHOLD:
-                raise HTTPException(
-                    status_code=401,
-                    detail=f"Face not recognized with confidence (similarity score: {similarity_score:.2f})"
-                )
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error in face matching: {str(e)}"
             )
         try:
             attendees = event.get('attendees', [])
