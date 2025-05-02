@@ -25,7 +25,6 @@ logger = logging.getLogger(__name__)
 class ModelManager:
     _instance = None
     _model = None
-    _model_path = Path("/opt/render/.deepface/weights/facenet_weights.h5")
 
     @classmethod
     def get_instance(cls):
@@ -36,24 +35,45 @@ class ModelManager:
     def ensure_model_loaded(self):
         if self._model is None:
             logger.info("Loading Facenet model...")
-            self._model_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            if not self._model_path.exists():
-                logger.info("Downloading Facenet model...")
-                from deepface.commons import functions
-                functions.loadModel("Facenet")
-            
-            logger.info("Model already exists, loading from cache...")
-            self._model = DeepFace
-            logger.info("Facenet model loaded successfully")
-        else:
-            logger.debug("Using cached Facenet model")
+            try:
+                self._model = DeepFace
+                logger.info("Facenet model loaded successfully")
+            except Exception as e:
+                logger.error(f"Error loading model: {str(e)}")
+                raise
         return self._model
 
     def get_model(self):
         return self.ensure_model_loaded()
 
-# Initialize the ModelManager
+    @staticmethod
+    async def analyze_face(image_path):
+        try:
+            backends = ['opencv', 'retinaface', 'mtcnn', 'ssd']
+            last_error = None
+            
+            for backend in backends:
+                try:
+                    result = DeepFace.represent(
+                        img_path=image_path,
+                        model_name="Facenet",
+                        detector_backend=backend,
+                        enforce_detection=True,
+                        align=True
+                    )
+                    if result and len(result) > 0:
+                        return result[0]
+                except Exception as e:
+                    last_error = str(e)
+                    logger.warning(f"Backend {backend} failed: {str(e)}")
+                    continue
+            
+            raise ValueError(f"All face detection backends failed. Last error: {last_error}")
+        except Exception as e:
+            logger.error(f"Face analysis failed: {str(e)}")
+            raise
+
+# Initialize ModelManager
 model_manager = ModelManager.get_instance()
 
 class GeoLocation(BaseModel):
@@ -259,29 +279,43 @@ async def register_attendance(
     selfie: UploadFile = File(...)
 ):
     try:
+        # Validate file type
         if not selfie.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file must be an image"
+            )
 
-        # Fetch event details
+        # Get event details
         mongo_db = Database.get_db()
         events_collection = mongo_db.EventDetails
         event = events_collection.find_one({
             '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
         })
+        
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
 
         # Validate location
         event_location = event.get("event_location", {})
         if not event_location or event_location.get("type") != "Point" or not event_location.get("coordinates"):
-            raise HTTPException(status_code=400, detail="Invalid event location format in database")
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid event location format"
+            )
 
         event_coords = event_location["coordinates"]
         event_lng, event_lat = event_coords[0], event_coords[1]
 
-        if not all(-90 <= x <= 90 for x in [event_lat, user_lat]) or not all(-180 <= x <= 180 for x in [event_lng, user_lng]):
-            raise HTTPException(status_code=400, detail="Coordinates out of valid range")
+        # Validate coordinates
+        if not all(-90 <= x <= 90 for x in [event_lat, user_lat]) or \
+           not all(-180 <= x <= 180 for x in [event_lng, user_lng]):
+            raise HTTPException(
+                status_code=400,
+                detail="Coordinates out of valid range"
+            )
 
+        # Calculate distance
         user_loc = (user_lat, user_lng)
         event_loc = (event_lat, event_lng)
         distance_m = haversine(user_loc, event_loc, unit=Unit.METERS)
@@ -293,66 +327,55 @@ async def register_attendance(
                 detail=f"You are {distance_m:.0f}m away from the event location. Must be within {ATTENDANCE_RADIUS_METERS}m."
             )
 
-        # Face detection and recognition
+        # Process face detection
+        temp_file_path = None
         try:
-            temp_file_path = None
-            try:
-                content = await selfie.read()
-                fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
-                with os.fdopen(fd, 'wb') as temp_file:
-                    temp_file.write(content)
+            # Save uploaded file
+            content = await selfie.read()
+            fd, temp_file_path = tempfile.mkstemp(suffix='.jpg')
+            with os.fdopen(fd, 'wb') as temp_file:
+                temp_file.write(content)
 
-                deepface_model = model_manager.get_model()
-                detector_backends = ['retinaface', 'mtcnn', 'opencv', 'ssd']
-                face_analysis = None
-                last_error = None
+            # Analyze face
+            face_data = await ModelManager.analyze_face(temp_file_path)
+            if not face_data:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No face detected in the image"
+                )
 
-                for backend in detector_backends:
-                    try:
-                        face_analysis = deepface_model.represent(
-                            img_path=temp_file_path,
-                            model_name="Facenet",
-                            detector_backend=backend,
-                            enforce_detection=True,
-                            align=True
-                        )
-                        if face_analysis and len(face_analysis) > 0:
-                            break
-                    except Exception as e:
-                        last_error = str(e)
-                        continue
-
-                if not face_analysis or len(face_analysis) == 0:
-                    raise ValueError(f"Face detection failed with all backends. Last error: {last_error}")
-
-                user_embedding = face_analysis[0]
-
-            finally:
-                if temp_file_path and os.path.exists(temp_file_path):
-                    try:
-                        os.remove(temp_file_path)
-                    except:
-                        pass
+            # Extract embedding
+            embedding = face_data if isinstance(face_data, list) else face_data.tolist()
 
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Face detection failed: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Face detection failed: {str(e)}"
+            )
+        finally:
+            if temp_file_path and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except Exception as e:
+                    logger.error(f"Error removing temporary file: {str(e)}")
 
         # Match face with database
         try:
-            embedding_list = user_embedding.tolist() if isinstance(user_embedding, np.ndarray) else user_embedding
             SIMILARITY_THRESHOLD = 0.8
-            
             response = SupabaseDB.get_client().rpc(
                 'match_face_vector',
                 {
-                    'query_embedding': embedding_list,
+                    'query_embedding': embedding,
                     'similarity_threshold': SIMILARITY_THRESHOLD,
                     'match_count': 1
                 }
             ).execute()
 
             if not response.data or len(response.data) == 0:
-                raise HTTPException(status_code=401, detail="Face not recognized as a registered user")
+                raise HTTPException(
+                    status_code=401,
+                    detail="Face not recognized as a registered user"
+                )
 
             match = response.data[0]
             best_match = match['reg_no']
@@ -362,16 +385,20 @@ async def register_attendance(
             if similarity_score > SIMILARITY_THRESHOLD:
                 raise HTTPException(
                     status_code=401,
-                    detail=f"Face not recognized with confidence (similarity score: {similarity_score:.2f})"
+                    detail=f"Face not recognized with sufficient confidence (score: {similarity_score:.2f})"
                 )
 
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error in face matching: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error in face matching: {str(e)}"
+            )
 
         # Register attendance
         try:
+            # Check if already registered
             attendees = event.get('attendees', [])
             if attendees and any(
                 isinstance(attendee, dict) and 
@@ -380,7 +407,7 @@ async def register_attendance(
             ):
                 return {
                     "status": "already_registered",
-                    "message": f"Attendance already registered for {best_match_name} at this event",
+                    "message": f"Attendance already registered for {best_match_name}",
                     "data": {
                         "reg_no": best_match,
                         "name": best_match_name,
@@ -388,6 +415,7 @@ async def register_attendance(
                     }
                 }
 
+            # Update attendance
             update_result = events_collection.update_one(
                 {'_id': event['_id']},
                 {
@@ -402,7 +430,10 @@ async def register_attendance(
             )
 
             if update_result.modified_count == 0:
-                raise HTTPException(status_code=500, detail="Failed to update attendance")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to update attendance"
+                )
 
             return {
                 "status": "success",
@@ -417,13 +448,18 @@ async def register_attendance(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error recording attendance: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error recording attendance: {str(e)}"
+            )
 
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="debug")
