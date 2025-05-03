@@ -37,6 +37,7 @@ app.add_middleware(
         "http://0.0.0.0",
         "https://ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app/",
     ],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
