@@ -7,3 +7,4 @@ supabase
 numpy
 haversine
 deepface
+python-dotenv
