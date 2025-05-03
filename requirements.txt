@@ -3,8 +3,8 @@ uvicorn
 python-multipart
 numpy
 haversine
-deepface==0.0.75
-tensorflow==2.13.0
+dlib==19.24.0
+face_recognition==1.3.0
 opencv-python-headless
 pillow
 python-jose[cryptography]
