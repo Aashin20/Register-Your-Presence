@@ -8,3 +8,4 @@ numpy
 haversine
 deepface
 python-dotenv
+tf-keras
