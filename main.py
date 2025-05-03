@@ -8,7 +8,8 @@ from typing import List, Optional, Dict, Any, Union
 from datetime import date, time
 import numpy as np
 from haversine import haversine, Unit
-from deepface import DeepFace
+import face_recognition
+import cv2
 import tempfile
 from bson import ObjectId
 import os
@@ -25,25 +26,15 @@ from functools import lru_cache
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Configure TensorFlow to be less verbose and limit memory growth
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-tf_config = tf.compat.v1.ConfigProto()
-tf_config.gpu_options.allow_growth = True
-tf_config.gpu_options.per_process_gpu_memory_fraction = 0.5  # Limit GPU memory usage
-tf_session = tf.compat.v1.Session(config=tf_config)
-tf.compat.v1.keras.backend.set_session(tf_session)
-
+# Constants
 # Constants
 MAX_IMAGE_SIZE = 1024 * 1024 * 5  # 5MB
 FACE_DETECTION_TIMEOUT = 30  # 30 seconds
 ATTENDANCE_RADIUS_METERS = 100
-SIMILARITY_THRESHOLD = 0.8
+SIMILARITY_THRESHOLD = 0.8  # Adjusted for face_recognition library
 
 class ModelManager:
     _instance = None
-    _model = None
-    _initialized = False
-    _preferred_backend = 'retinaface'  # Set a single preferred backend
 
     @classmethod
     def get_instance(cls):
@@ -51,95 +42,55 @@ class ModelManager:
             cls._instance = ModelManager()
         return cls._instance
 
-    def initialize(self):
-        """Initialize the model during server startup, but with memory optimizations"""
-        if not self._initialized:
-            logger.info("Initializing DeepFace model...")
-            try:
-                # Make sure the directory exists
-                os.makedirs(os.environ.get("DEEPFACE_HOME", "./deepface_models"), exist_ok=True)
-                
-                # Just store the reference, don't preload any models
-                self._model = DeepFace
-                self._initialized = True
-                logger.info("DeepFace model initialized successfully")
-            except Exception as e:
-                logger.error(f"Error initializing model: {str(e)}")
-                raise
-        return self._model
-
-    def get_model(self):
-        if not self._initialized:
-            self.initialize()
-        return self._model
-
     @staticmethod
-    def convert_to_list(embedding):
-        """Convert embedding to list format regardless of input type"""
-        if isinstance(embedding, np.ndarray):
-            return embedding.tolist()
-        elif isinstance(embedding, list):
-            return embedding
-        elif isinstance(embedding, (float, np.float32, np.float64)):
-            # For single float values, create a list with that value
-            return [float(embedding)]
-        else:
-            raise ValueError(f"Unexpected embedding type: {type(embedding)}")
-
-    @staticmethod
-    async def analyze_face(image_path):
-        model_manager = ModelManager.get_instance()
-        model = model_manager.get_model()
-        
-        # Use a single preferred backend with a timeout
+    async def analyze_face(image_path: str) -> List[float]:
+        """Get face encoding from image"""
         try:
-            # Run in a separate thread to avoid blocking
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: model.represent(
-                    img_path=image_path,
-                    model_name="Facenet",
-                    detector_backend=ModelManager._preferred_backend,
-                    enforce_detection=True,
-                    align=True
-                )
-            )
+            # Load image
+            image = face_recognition.load_image_file(image_path)
             
-            if result and len(result) > 0:
-                # Convert the embedding to the correct format
-                embedding = result[0]
-                return ModelManager.convert_to_list(embedding)
+            # Find face locations
+            face_locations = face_recognition.face_locations(image, model="hog")  # Use 'cnn' for GPU
             
-            raise ValueError("No face detected in the image")
-        
+            if not face_locations:
+                raise ValueError("No face detected in the image")
+
+            if len(face_locations) > 1:
+                logger.warning("Multiple faces detected in image, using the first one")
+
+            # Get face encoding
+            face_encodings = face_recognition.face_encodings(image, face_locations)
+            
+            if not face_encodings:
+                raise ValueError("Failed to encode face")
+
+            # Convert numpy array to list
+            encoding = face_encodings[0].tolist()
+            return encoding
+
         except Exception as e:
-            # If the preferred backend fails, try a fallback
-            try:
-                logger.warning(f"Preferred backend failed: {str(e)}, trying fallback")
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: model.represent(
-                        img_path=image_path,
-                        model_name="Facenet",
-                        detector_backend="opencv",  # Fallback to opencv
-                        enforce_detection=True,
-                        align=True
-                    )
-                )
-                
-                if result and len(result) > 0:
-                    # Convert the embedding to the correct format
-                    embedding = result[0]
-                    return ModelManager.convert_to_list(embedding)
-            except Exception as fallback_error:
-                logger.error(f"Fallback detection failed: {str(fallback_error)}")
-                
-            raise ValueError(f"Face detection failed: {str(e)}")
+            logger.error(f"Face analysis failed: {str(e)}")
+            raise ValueError(f"Face analysis failed: {str(e)}")
 
-# Initialize ModelManager at the module level
-model_manager = ModelManager.get_instance()
-
+    @staticmethod
+    def compare_faces(encoding1: List[float], encoding2: List[float], tolerance: float = 0.6) -> float:
+        """Compare two face encodings"""
+        try:
+            # Convert lists to numpy arrays
+            np_encoding1 = np.array(encoding1)
+            np_encoding2 = np.array(encoding2)
+            
+            # Calculate Euclidean distance
+            distance = np.linalg.norm(np_encoding1 - np_encoding2)
+            
+            # Convert distance to similarity score (inverse relationship)
+            similarity = 1 - distance
+            
+            return float(similarity)
+            
+        except Exception as e:
+            logger.error(f"Error comparing faces: {str(e)}")
+            raise
 class GeoLocation(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lng: float = Field(..., ge=-180, le=180)
@@ -161,7 +112,7 @@ async def lifespan(app: FastAPI):
     try:
         # Initialize model during startup - but don't preload everything
         logger.info("Initializing model...")
-        model_manager.initialize()
+        model_manager = ModelManager.get_instance()
         logger.info("Model initialization complete")
         
         # Initialize databases
@@ -391,31 +342,27 @@ async def process_face_async(
     try:
         logger.info(f"Processing attendance for reg_no: {reg_no}")
         
-        # Check if user exists in face_embeddings table
+        # Get user data from Supabase
         user_data = SupabaseDB.get_client().table('face_embeddings') \
             .select('*') \
             .eq('reg_no', reg_no) \
             .execute()
         
         if not user_data.data or len(user_data.data) == 0:
-            logger.warning(f"No user found with reg_no: {reg_no}")
             return None, f"No user found with registration number {reg_no}"
 
         user = user_data.data[0]
-        stored_embedding = user.get('embedding')  # Use 'embedding' instead of 'face_embedding'
-        
-        if not stored_embedding:
-            logger.warning(f"No face data found for reg_no: {reg_no}")
+        stored_encoding = user.get('embedding')
+
+        if not stored_encoding:
             return None, f"No face data found for registration number {reg_no}"
 
         # Check for duplicate attendance
-        attendees = event.get('attendees', [])
-        if attendees and any(
+        if event.get('attendees') and any(
             isinstance(attendee, dict) and 
             attendee.get('reg_no') == reg_no 
-            for attendee in attendees
+            for attendee in event['attendees']
         ):
-            logger.info(f"Duplicate attendance detected for reg_no: {reg_no}")
             return {
                 "status": "already_registered",
                 "message": f"Attendance already registered for {user['name']}",
@@ -425,37 +372,30 @@ async def process_face_async(
                 }
             }, None
 
-        # Process the selfie
         try:
-            logger.info("Analyzing uploaded selfie...")
-            new_embedding = await ModelManager.analyze_face(temp_file_path)
+            # Get face encoding from selfie
+            new_encoding = await ModelManager.analyze_face(temp_file_path)
             
-            if not new_embedding:
+            if not new_encoding:
                 return None, "No face detected in the selfie"
 
-            # Convert embeddings to numpy arrays for comparison
-            stored_np = np.array(stored_embedding)
-            new_np = np.array(new_embedding)
-            
-            # Calculate cosine similarity
-            similarity_score = 1 - (np.dot(stored_np, new_np) / 
-                               (np.linalg.norm(stored_np) * np.linalg.norm(new_np)))
-            
+            # Compare faces
+            similarity_score = ModelManager.compare_faces(stored_encoding, new_encoding)
             logger.info(f"Face similarity score: {similarity_score:.4f}")
 
-            if similarity_score > SIMILARITY_THRESHOLD:
+            if similarity_score < SIMILARITY_THRESHOLD:
                 return None, f"Face verification failed. Score: {similarity_score:.2f}"
 
             # Update attendance in database
-            mongo_db = Database.get_db()
-            events_collection = mongo_db.EventDetails
-            
             attendance_record = {
                 'reg_no': reg_no,
                 'name': user['name'],
                 'timestamp': datetime.datetime.now().isoformat(),
                 'verification_score': float(similarity_score)
             }
+
+            mongo_db = Database.get_db()
+            events_collection = mongo_db.EventDetails
             
             update_result = events_collection.update_one(
                 {'_id': event['_id']},
@@ -463,10 +403,8 @@ async def process_face_async(
             )
 
             if update_result.modified_count == 0:
-                logger.error("Failed to update attendance record")
                 return None, "Failed to update attendance"
 
-            logger.info(f"Successfully registered attendance for reg_no: {reg_no}")
             return {
                 "status": "success",
                 "message": f"Attendance registered successfully for {user['name']}",
@@ -487,10 +425,9 @@ async def process_face_async(
         return None, f"Error in face processing: {str(e)}"
     finally:
         # Cleanup temporary file
-        if temp_file_path and os.path.exists(temp_file_path):
+        if os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)
-                logger.info("Temporary file cleaned up")
             except Exception as e:
                 logger.error(f"Error removing temporary file: {str(e)}")
 
