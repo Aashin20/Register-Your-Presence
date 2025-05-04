@@ -41,6 +41,8 @@ app.add_middleware(
         "192.168.1.10",
         "0.0.0.0",
         "ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app",
+        "https://ryp-frontend-nu.vercel.app",  # Added your frontend domain
+        "ryp-frontend-nu.vercel.app" 
     ],
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
