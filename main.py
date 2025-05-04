@@ -41,7 +41,7 @@ app.add_middleware(
         "192.168.1.10",
         "0.0.0.0",
         "ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app",
-        "https://ryp-frontend-nu.vercel.app",  # Added your frontend domain
+        "https://ryp-frontend-nu.vercel.app",  
         "ryp-frontend-nu.vercel.app",
         "https://register-your-presence.onrender.com"
     ],
@@ -53,7 +53,7 @@ app.add_middleware(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # WARNING: Don't use in production
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -317,7 +317,7 @@ async def register_attendance(
                 {'$push': {'attendees': attendee_info}}
             )
             
-            return {"status": "success", "message": "Attendance registered successfully"}
+            return {"status": "success", "message": "Attendance registered successfully", "info": attendee_info}
         else:
             raise HTTPException(status_code=403, detail="Face verification failed. Please try again.")
             
