@@ -42,9 +42,18 @@ app.add_middleware(
         "0.0.0.0",
         "ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app",
         "https://ryp-frontend-nu.vercel.app",  # Added your frontend domain
-        "ryp-frontend-nu.vercel.app" 
+        "ryp-frontend-nu.vercel.app",
+        "https://register-your-presence.onrender.com"
     ],
     allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # WARNING: Don't use in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
