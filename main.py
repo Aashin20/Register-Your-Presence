@@ -286,7 +286,7 @@ async def register_attendance(
         else:
             stored_embedding = np.array(stored_embedding_data)
         
-        import numpy as np
+        
         
         stored_norm = stored_embedding / np.linalg.norm(stored_embedding)
         result_norm = result / np.linalg.norm(result)
