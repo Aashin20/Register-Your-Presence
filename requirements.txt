@@ -9,3 +9,4 @@ uvicorn
 python-multipart
 face-recognition
 opencv-python 
+https://github.com/kwea123/dlib_builder/releases/download/v19.21/dlib-19.21.0-cp311-cp311-linux_x86_64.whl
