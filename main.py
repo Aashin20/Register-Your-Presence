@@ -325,6 +325,59 @@ async def register_attendance(
             except:
                 pass
 
+@app.post("/register_face")
+async def register_face(
+    reg_no: str = Form(...),
+    name: str = Form(...),
+    selfie: UploadFile = File(...)
+):
+    temp_path = None
+    try:
+        if not selfie.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="Uploaded file must be an image")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+            await selfie.seek(0)
+            content = await selfie.read()
+            temp_file.write(content)
+            temp_path = temp_file.name
+
+        selfie_image = face_recognition.load_image_file(temp_path)
+        selfie_encodings = face_recognition.face_encodings(selfie_image)
+
+        if not selfie_encodings:
+            raise HTTPException(status_code=400, detail="No face detected in the selfie")
+
+        face_embedding = selfie_encodings[0]
+        embedding_list = face_embedding.tolist()
+
+        response = SupabaseDB.insert_or_update_face(
+            reg_no=reg_no,
+            name=name,
+            embedding=embedding_list
+        )
+
+        if response.data:
+            return {
+                "status": "success",
+                "message": "Face registration successful",
+                "reg_no": reg_no,
+                "name": name
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Failed to register face")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001, log_level="debug")
