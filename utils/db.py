@@ -57,7 +57,26 @@ class SupabaseDB:
             except Exception as e:
                 print(f"Failed to connect to Supabase: {e}")
                 raise e
-
+    @classmethod
+    def insert_or_update_face(cls, reg_no: str, name: str, embedding: list):
+        """Helper method to insert or update face data with pgvector"""
+        client = cls.get_client()
+        try:
+            # Convert the embedding list to a properly formatted vector string
+            vector_str = f"[{','.join(map(str, embedding))}]"
+            
+            response = client.rpc(
+                'upsert_face_embedding',
+                {
+                    'p_reg_no': reg_no,
+                    'p_name': name,
+                    'p_embedding': vector_str
+                }
+            ).execute()
+            return response
+        except Exception as e:
+            print(f"Error in insert_or_update_face: {e}")
+            raise e
     @classmethod
     def get_client(cls) -> Client:
         """Returns the Supabase client instance"""
