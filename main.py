@@ -18,6 +18,10 @@ import csv
 import io
 import re
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Database.initialize()
@@ -268,7 +272,8 @@ async def register_attendance(
         embed = DeepFace.represent(
             img_path=temp_path,
             model_name="Facenet",
-            enforce_detection=True
+            enforce_detection=True,
+            detector_backend='opencv' 
         )
         
         if not embed or len(embed) == 0:
