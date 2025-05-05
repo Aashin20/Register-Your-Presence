@@ -8,9 +8,8 @@ from typing import List, Optional
 from datetime import date, time
 import numpy as np
 from haversine import haversine, Unit
-from deepface import DeepFace
+import face_recognition
 import tempfile
-import shutil
 from bson import ObjectId
 import os
 import datetime
@@ -18,9 +17,7 @@ import csv
 import io
 import re
 
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"  
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -269,19 +266,15 @@ async def register_attendance(
             temp_file.write(content)
             temp_path = temp_file.name
         
-        embed = DeepFace.represent(
-            img_path=temp_path,
-            model_name="Facenet",
-            enforce_detection=True,
-            detector_backend='opencv' 
-        )
+        selfie_image = face_recognition.load_image_file(temp_path)
+        selfie_encodings = face_recognition.face_encodings(selfie_image)
         
-        if not embed or len(embed) == 0:
+        if not selfie_encodings:
             raise HTTPException(status_code=400, detail="No face detected in the selfie")
-            
-        result = embed[0]["embedding"]
-        result = np.array(result)
         
+        selfie_encoding = selfie_encodings[0] 
+
+ 
         response = SupabaseDB.query("face_embeddings").match({"reg_no": reg_no}).execute()
         data = response.data
 
@@ -290,25 +283,20 @@ async def register_attendance(
 
         stored_embedding_data = data[0]['embedding']
         
+     
         if isinstance(stored_embedding_data, str):
             try:
                 clean_str = stored_embedding_data.strip('[]').split(',')
-                stored_embedding = np.array([float(val) for val in clean_str])
+                stored_encoding = np.array([float(val) for val in clean_str])
             except Exception as e:
                 number_strings = re.findall(r'-?\d+\.?\d*', stored_embedding_data)
-                stored_embedding = np.array([float(val) for val in number_strings])
+                stored_encoding = np.array([float(val) for val in number_strings])
         else:
-            stored_embedding = np.array(stored_embedding_data)
-        
-        
-        
-        stored_norm = stored_embedding / np.linalg.norm(stored_embedding)
-        result_norm = result / np.linalg.norm(result)
-        
-        similarity = np.dot(stored_norm, result_norm)
-        
-        cosine_distance = 1 - similarity
-        is_same_person = cosine_distance < 0.8
+            stored_encoding = np.array(stored_embedding_data)
+
+      
+        face_distance = face_recognition.face_distance([stored_encoding], selfie_encoding)[0]
+        is_same_person = face_distance < 0.8  
 
         if is_same_person:
             attendee_info = {
