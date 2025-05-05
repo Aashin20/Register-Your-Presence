@@ -8,6 +8,6 @@ supabase
 uvicorn
 python-multipart
 face-recognition
-opencv-python 
-https://github.com/nmslib/hnswlib/releases/download/v0.7.0/hnswlib-0.7.0-cp311-cp311-linux_x86_64.whl
-https://github.com/z-mahmud22/Dlib_Wheel_Python3.11/raw/main/dlib-19.24.1-cp311-cp311-linux_x86_64.whl
+opencv-python-headless
+cmake
+dlib @ https://github.com/shashankx86/dlib_compiled_wheels/raw/main/dlib-19.24.0-cp311-cp311-linux_x86_64.whl
