@@ -9,5 +9,4 @@ uvicorn
 python-multipart
 face-recognition
 opencv-python-headless
-cmake
-dlib @ https://github.com/shashankx86/dlib_compiled_wheels/raw/main/dlib-19.24.0-cp311-cp311-linux_x86_64.whl
+dlib

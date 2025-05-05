@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ryp-backend
+    env: docker
+    buildCommand: docker build -t ryp-backend .
+    startCommand: docker run -p $PORT:8000 ryp-backend
+    envVars:
+      - key: MONGO_URI
+        value: mongodb+srv://admin:xbBfxu0iGRFMDP4I@eventdetails.azwpfam.mongodb.net/?retryWrites=true&w=majority
+      - key: MONGO_DBNAME
+        value: EventDetails
+      - key: SUPABASE_URL
+        value: https://fxwxmkgruvdxyqcspvbm.supabase.co
+      - key: SUPABASE_KEY
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ4d3hta2dydXZkeHlxY3NwdmJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU1ODMyMjMsImV4cCI6MjA2MTE1OTIyM30.Df2fn0R2TAuwehqKhXZJuNno73XwNVUknYJ-Z18mmbM

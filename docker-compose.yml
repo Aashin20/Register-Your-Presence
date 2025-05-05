@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=mongodb+srv://admin:xbBfxu0iGRFMDP4I@eventdetails.azwpfam.mongodb.net/?retryWrites=true&w=majority
+      - MONGO_DBNAME=EventDetails
+      - SUPABASE_URL=https://fxwxmkgruvdxyqcspvbm.supabase.co
+      - SUPABASE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZ4d3hta2dydXZkeHlxY3NwdmJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU1ODMyMjMsImV4cCI6MjA2MTE1OTIyM30.Df2fn0R2TAuwehqKhXZJuNno73XwNVUknYJ-Z18mmbM
+    volumes:
+      - .:/app
