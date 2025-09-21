@@ -1,10 +1,27 @@
 import os
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float,text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.sql import func
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
-from supabase import create_client, Client
+import logging
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+Base = declarative_base()
+
+class FaceEmbedding(Base):
+    __tablename__ = 'ctech_faculties'
+    
+    id = Column(Integer, primary_key=True)
+    reg_no = Column(String(50), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    embedding = Column(ARRAY(Float), nullable=False)
 
 class Database:
     client = None
@@ -12,21 +29,21 @@ class Database:
 
     @classmethod
     def initialize(cls):
-        if not cls.client:
+        if cls.client is None:
             uri = os.getenv("MONGO_URI")
             dbname = os.getenv("MONGO_DBNAME")
             cls.client = MongoClient(uri, server_api=ServerApi('1'))
             cls.db = cls.client[dbname]
             try:
                 cls.client.admin.command('ping')
-                print("Connected to MongoDB!")
+                logger.info("Connected to MongoDB")
             except Exception as e:
-                print(f"Failed to connect to MongoDB: {e}")
-                raise e
+                logger.error(f"MongoDB connection failed: {e}")
+                raise
 
     @classmethod
     def get_db(cls):
-        if not cls.client:
+        if cls.client is None:
             cls.initialize()
         return cls.db
 
@@ -34,88 +51,115 @@ class Database:
     def close(cls):
         if cls.client:
             cls.client.close()
-            print("MongoDB connection closed")
             cls.client = None
             cls.db = None
+            logger.info("MongoDB connection closed")
 
-class SupabaseDB:
-    client = None
+class PostgresDB:
+    engine = None
+    SessionLocal = None
 
     @classmethod
     def initialize(cls):
-        if not cls.client:
-            supabase_url = os.getenv("SUPABASE_URL")
-            supabase_key = os.getenv("SUPABASE_KEY")
+        if cls.engine is None:
+            postgres_url = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_HOST', 'localhost')}:{os.getenv('POSTGRES_PORT', '5432')}/{os.getenv('POSTGRES_DB')}"
             
-            if not supabase_url or not supabase_key:
-                raise ValueError("SUPABASE_URL and SUPABASE_KEY environment variables must be set")
+            cls.engine = create_engine(
+                postgres_url,
+                pool_size=20,
+                max_overflow=40,
+                pool_pre_ping=True,
+                pool_recycle=3600,
+                echo=False
+            )
+            
+            cls.SessionLocal = scoped_session(sessionmaker(
+                autocommit=False,
+                autoflush=False,
+                bind=cls.engine
+            ))
             
             try:
-                cls.client = create_client(supabase_url, supabase_key)
-                test_query = cls.client.table('face_embeddings').select("reg_no").limit(1).execute()
-                print("Connected to Supabase successfully!")
+                with cls.engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                logger.info("Connected to PostgreSQL")
             except Exception as e:
-                print(f"Failed to connect to Supabase: {e}")
-                raise e
+                logger.error(f"PostgreSQL connection failed: {e}")
+                raise
+
+    @classmethod
+    def get_session(cls):
+        if cls.SessionLocal is None:
+            cls.initialize()
+        return cls.SessionLocal()
+
+    @classmethod
+    def get_face_by_reg_no(cls, reg_no: str):
+        session = cls.get_session()
+        try:
+            return session.query(FaceEmbedding).filter(FaceEmbedding.reg_no == reg_no).first()
+        finally:
+            session.close()
+
     @classmethod
     def insert_or_update_face(cls, reg_no: str, name: str, embedding: list):
-        """Helper method to insert or update face data with pgvector"""
-        client = cls.get_client()
+        session = cls.get_session()
         try:
-            # Convert the embedding list to a properly formatted vector string
-            vector_str = f"[{','.join(map(str, embedding))}]"
+            face = session.query(FaceEmbedding).filter(FaceEmbedding.reg_no == reg_no).first()
+            if face:
+                face.name = name
+                face.embedding = embedding
+                face.updated_at = func.now()
+            else:
+                face = FaceEmbedding(reg_no=reg_no, name=name, embedding=embedding)
+                session.add(face)
             
-            response = client.rpc(
-                'upsert_face_embedding',
-                {
-                    'p_reg_no': reg_no,
-                    'p_name': name,
-                    'p_embedding': vector_str
-                }
-            ).execute()
-            return response
+            session.commit()
+            return {'reg_no': face.reg_no, 'name': face.name, 'id': face.id}
         except Exception as e:
-            print(f"Error in insert_or_update_face: {e}")
-            raise e
+            session.rollback()
+            logger.error(f"Error in insert_or_update_face: {e}")
+            raise
+        finally:
+            session.close()
+
     @classmethod
-    def get_client(cls) -> Client:
-        """Returns the Supabase client instance"""
-        if not cls.client:
-            cls.initialize()
-        return cls.client
-    
+    def get_all_faces(cls):
+        session = cls.get_session()
+        try:
+            faces = session.query(FaceEmbedding.reg_no, FaceEmbedding.name).order_by(FaceEmbedding.name).all()
+            return [{'reg_no': face.reg_no, 'name': face.name} for face in faces]
+        finally:
+            session.close()
+
     @classmethod
-    def query(cls, table_name):
-        """Helper method to start a query on a table"""
-        client = cls.get_client()
-        return client.table(table_name).select("*")
-    
+    def delete_face(cls, reg_no):
+        session = cls.get_session()
+        try:
+            deleted_count = session.query(FaceEmbedding).filter(FaceEmbedding.reg_no == reg_no).delete()
+            session.commit()
+            return deleted_count
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error in delete_face: {e}")
+            raise
+        finally:
+            session.close()
+
     @classmethod
-    def match_face(cls, embedding, threshold=0.6, match_count=1):
-        """Helper method specifically for face matching using pgvector"""
-        return cls.rpc(
-            "match_face_vector", 
-            {
-                "query_embedding": embedding,
-                "similarity_threshold": threshold,
-                "match_count": match_count
-            }
-        ).execute()
-    
+    def get_face_count(cls):
+        session = cls.get_session()
+        try:
+            return session.query(FaceEmbedding).count()
+        finally:
+            session.close()
+
     @classmethod
-    def register_face(cls, reg_no, name, embedding):
-        """Helper method to register a new face"""
-        return cls.rpc(
-            "register_face",
-            {
-                "p_reg_no": reg_no,
-                "p_name": name,
-                "p_embedding": embedding
-            }
-        ).execute()
-    
-    @classmethod
-    def rpc(cls, function_name, params=None):
-        """Helper method to call a stored procedure"""
-        client = cls.get_client()
-        return client.rpc(function_name, params or {})
+    def close(cls):
+        if cls.SessionLocal:
+            cls.SessionLocal.remove()
+        if cls.engine:
+            cls.engine.dispose()
+            cls.engine = None
+            cls.SessionLocal = None
+            logger.info("PostgreSQL connection closed")

@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
-from utils.db import Database, SupabaseDB
+from utils.db import Database, PostgresDB
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import date, time
@@ -15,46 +15,22 @@ import os
 import datetime
 import csv
 import io
-import re
-
-
+import base64
+import uuid
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Database.initialize()
-    SupabaseDB.initialize()
+    PostgresDB.initialize()
     yield
     Database.close()
-    SupabaseDB.close()
+    PostgresDB.close()
 
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://abcd.ngrok.io",
-        "http://192.168.1.10:3000",
-        "http://0.0.0.0",
-        "https://ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app/",
-        "localhost:3000",
-        "abcd.ngrok.io",
-        "192.168.1.10",
-        "0.0.0.0",
-        "ryp-frontend-nt04vd4m3-aashin20s-projects.vercel.app",
-        "https://ryp-frontend-nu.vercel.app",  
-        "ryp-frontend-nu.vercel.app",
-        "https://register-your-presence.onrender.com"
-    ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -75,18 +51,19 @@ class Event(BaseModel):
     attendees: Optional[List[str]] = None
 
 @app.post("/login")
-async def login(email: str, password: str, request: Request):
+async def login(email: str = Form(...), password: str = Form(...)):
     if email == "admin@gmail.com" and password == "admin":
         return {"message": "Login successful"}
     else:
-        return {"message": "Invalid credentials"}
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-@app.post("/create_event")
+@app.post("/create_event/")
 async def create_event(info: Event):
     db = Database.get_db().EventDetails
     exists = db.find_one({"event_name": info.event_name})
     if exists:
         return {"status": "Event already exists"}
+    
     event_dict = info.model_dump()
     for field in ['event_sdate', 'event_edate']:
         event_dict[field] = event_dict[field].isoformat()
@@ -96,6 +73,7 @@ async def create_event(info: Event):
         "type": "Point",
         "coordinates": [event_dict['event_location']['lng'], event_dict['event_location']['lat']]
     }
+    
     db.insert_one(event_dict)
     return {"status": "Event created successfully"}
 
@@ -104,14 +82,9 @@ async def get_active_events():
     db = Database.get_db().EventDetails
     cursor = db.find(
         {"event_sdate": {"$gte": date.today().isoformat()}},
-        {
-            "event_name": 1,
-            "event_sdate": 1,
-            "event_stime": 1,
-            "attendees": 1,
-            "_id": 1 
-        }
+        {"event_name": 1, "event_sdate": 1, "event_stime": 1, "attendees": 1, "_id": 1}
     )
+    
     event_list = []
     for event in cursor:
         event_summary = {
@@ -119,7 +92,7 @@ async def get_active_events():
             "event_name": event.get("event_name"),
             "event_sdate": event.get("event_sdate"),
             "event_stime": event.get("event_stime"),
-            "attendees_count": len(event.get("attendees", []) or [])
+            "attendees_count": len(event.get("attendees", []))
         }
         event_list.append(event_summary)
     return {"events": event_list}
@@ -129,14 +102,9 @@ async def get_past_events():
     db = Database.get_db().EventDetails
     cursor = db.find(
         {"event_sdate": {"$lt": date.today().isoformat()}},
-        {
-            "event_name": 1,
-            "event_sdate": 1,
-            "event_stime": 1,
-            "attendees": 1,
-            "_id": 1
-        }
+        {"event_name": 1, "event_sdate": 1, "event_stime": 1, "attendees": 1, "_id": 1}
     )
+    
     event_list = []
     for event in cursor:
         event_summary = {
@@ -144,31 +112,23 @@ async def get_past_events():
             "event_name": event.get("event_name"),
             "event_sdate": event.get("event_sdate"),
             "event_stime": event.get("event_stime"),
-            "attendees_count": len(event.get("attendees", []) or [])
+            "attendees_count": len(event.get("attendees", []))
         }
         event_list.append(event_summary)
     return {"events": event_list}
 
 @app.get("/available_events")
-async def get_active_events_full():
+async def get_available_events():
     db = Database.get_db().EventDetails
     cursor = db.find(
         {"event_sdate": {"$gte": date.today().isoformat()}},
-        {
-            "event_name": 1,
-            "event_desc": 1,
-            "event_location": 1, 
-            "event_sdate": 1,
-            "event_stime": 1,
-            "event_edate": 1,
-            "event_etime": 1,
-            "attendees": 1,
-        }
+        {"event_name": 1, "event_desc": 1, "event_location": 1, "event_sdate": 1, "event_stime": 1, "event_edate": 1, "event_etime": 1, "attendees": 1}
     )
+    
     events = []
     for event in cursor:
         event["_id"] = str(event["_id"])
-        event["attendees"] = event.get("attendees") or []
+        event["attendees"] = event.get("attendees", [])
         events.append(event)
     return {"events": events}
 
@@ -187,6 +147,87 @@ async def get_event_details(event_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching event details: {str(e)}")
 
+@app.get("/event/{event_id}/failed_attempts")
+async def get_failed_attempts(event_id: str):
+    try:
+        mongo_db = Database.get_db()
+        events_collection = mongo_db.EventDetails
+        event = events_collection.find_one({
+            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
+        }, {"failed_attempts": 1, "event_name": 1})
+        
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        failed_attempts = event.get('failed_attempts', [])
+        return {
+            "event_name": event.get("event_name", ""),
+            "failed_attempts": failed_attempts,
+            "count": len(failed_attempts)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching failed attempts: {str(e)}")
+
+@app.post("/admin/approve_attendance")
+async def approve_failed_attendance(
+    event_id: str = Form(...),
+    failed_attempt_id: str = Form(...)
+):
+    try:
+        mongo_db = Database.get_db()
+        events_collection = mongo_db.EventDetails
+        
+        # Find the event and the specific failed attempt
+        event = events_collection.find_one({
+            '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
+        })
+        
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        failed_attempts = event.get('failed_attempts', [])
+        failed_attempt = None
+        
+        # Find the specific failed attempt
+        for attempt in failed_attempts:
+            if attempt.get('attempt_id') == failed_attempt_id:
+                failed_attempt = attempt
+                break
+        
+        if not failed_attempt:
+            raise HTTPException(status_code=404, detail="Failed attempt not found")
+        
+        # Create attendee info from failed attempt
+        current_time = datetime.datetime.utcnow()
+        attendee_info = {
+            "reg_no": failed_attempt.get('reg_no'),
+            "name": failed_attempt.get('name', 'Unknown'),
+            "timestamp": current_time,
+            "intime": current_time,
+            "approved_manually": True,
+            "original_attempt_time": failed_attempt.get('timestamp')
+        }
+        
+        # Add to attendees and remove from failed_attempts
+        events_collection.update_one(
+            {'_id': ObjectId(event_id) if len(event_id) == 24 else event_id},
+            {
+                '$push': {'attendees': attendee_info},
+                '$pull': {'failed_attempts': {'attempt_id': failed_attempt_id}}
+            }
+        )
+        
+        return {
+            "status": "success",
+            "message": "Attendance approved and marked successfully",
+            "attendee_info": attendee_info
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error approving attendance: {str(e)}")
+
 @app.get("/event/{event_id}/attendance/download")
 async def download_attendance(event_id: str):
     try:
@@ -197,15 +238,19 @@ async def download_attendance(event_id: str):
         })
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
+        
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(['Registration No', 'Name', 'Timestamp'])
+        writer.writerow(['Registration No', 'Name', 'Timestamp', 'In Time', 'Approved Manually'])
         for attendee in event.get('attendees', []):
             writer.writerow([
                 attendee.get('reg_no', ''),
                 attendee.get('name', ''),
-                attendee.get('timestamp', '')
+                attendee.get('timestamp', ''),
+                attendee.get('intime', attendee.get('timestamp', '')),
+                'Yes' if attendee.get('approved_manually', False) else 'No'
             ])
+        
         response = StreamingResponse(
             iter([output.getvalue()]),
             media_type="text/csv"
@@ -270,38 +315,66 @@ async def register_attendance(
         selfie_encodings = face_recognition.face_encodings(selfie_image)
         
         if not selfie_encodings:
-            raise HTTPException(status_code=400, detail="No face detected in the selfie")
+            # Store failed attempt - no face detected, but return success
+            await selfie.seek(0)
+            image_data = await selfie.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            failed_attempt = {
+                "attempt_id": str(uuid.uuid4()),
+                "reg_no": reg_no,
+                "name": "Unknown",  # We don't have name since face wasn't detected
+                "timestamp": datetime.datetime.utcnow(),
+                "reason": "No face detected in selfie",
+                "selfie_data": image_base64,
+                "face_encoding": None,
+                "user_location": {"lat": user_lat, "lng": user_lng},
+                "distance_from_event": distance_m
+            }
+            
+            events_collection.update_one(
+                {'_id': ObjectId(event_id) if len(event_id) == 24 else event_id},
+                {'$push': {'failed_attempts': failed_attempt}}
+            )
+            
+            return {"status": "success", "message": "Attendance registered but face verification failed", "reason": "No face detected in selfie", "attempt_id": failed_attempt["attempt_id"]}
         
-        selfie_encoding = selfie_encodings[0] 
-
- 
-        response = SupabaseDB.query("face_embeddings").match({"reg_no": reg_no}).execute()
-        data = response.data
-
-        if not data or len(data) == 0:
-            raise HTTPException(status_code=404, detail="No matching registration found in database. Please contact admin.")
-
-        stored_embedding_data = data[0]['embedding']
+        selfie_encoding = selfie_encodings[0]
         
-     
-        if isinstance(stored_embedding_data, str):
-            try:
-                clean_str = stored_embedding_data.strip('[]').split(',')
-                stored_encoding = np.array([float(val) for val in clean_str])
-            except Exception as e:
-                number_strings = re.findall(r'-?\d+\.?\d*', stored_embedding_data)
-                stored_encoding = np.array([float(val) for val in number_strings])
-        else:
-            stored_encoding = np.array(stored_embedding_data)
+        face_record = PostgresDB.get_face_by_reg_no(reg_no)
+        if not face_record:
+            # Store failed attempt - no registration found, but return success
+            await selfie.seek(0)
+            image_data = await selfie.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            failed_attempt = {
+                "attempt_id": str(uuid.uuid4()),
+                "reg_no": reg_no,
+                "name": "Unknown",
+                "timestamp": datetime.datetime.utcnow(),
+                "reason": "No matching registration found in database",
+                "selfie_data": image_base64,
+                "face_encoding": selfie_encoding.tolist(),
+                "user_location": {"lat": user_lat, "lng": user_lng},
+                "distance_from_event": distance_m
+            }
+            
+            events_collection.update_one(
+                {'_id': ObjectId(event_id) if len(event_id) == 24 else event_id},
+                {'$push': {'failed_attempts': failed_attempt}}
+            )
+            
+            return {"status": "success", "message": "Attendance registered but face verification failed", "reason": "No matching registration found in database", "attempt_id": failed_attempt["attempt_id"]}
 
-      
+        stored_encoding = np.array(face_record.embedding)
         face_distance = face_recognition.face_distance([stored_encoding], selfie_encoding)[0]
         is_same_person = face_distance < 0.8  
 
         if is_same_person:
             attendee_info = {
                 "reg_no": reg_no,
-                "name": data[0]['name'],
+                "name": face_record.name,
                 "timestamp": datetime.datetime.utcnow()
             }
             
@@ -312,7 +385,30 @@ async def register_attendance(
             
             return {"status": "success", "message": "Attendance registered successfully", "info": attendee_info}
         else:
-            raise HTTPException(status_code=403, detail="Face verification failed. Please try again.")
+            # Store failed attempt - face verification failed, but return success
+            await selfie.seek(0)
+            image_data = await selfie.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            failed_attempt = {
+                "attempt_id": str(uuid.uuid4()),
+                "reg_no": reg_no,
+                "name": face_record.name,
+                "timestamp": datetime.datetime.utcnow(),
+                "reason": f"Face verification failed (distance: {face_distance:.3f})",
+                "selfie_data": image_base64,
+                "face_encoding": selfie_encoding.tolist(),
+                "user_location": {"lat": user_lat, "lng": user_lng},
+                "distance_from_event": distance_m,
+                "face_distance": face_distance
+            }
+            
+            events_collection.update_one(
+                {'_id': ObjectId(event_id) if len(event_id) == 24 else event_id},
+                {'$push': {'failed_attempts': failed_attempt}}
+            )
+            
+            return {"status": "success", "message": "Attendance registered but face verification failed", "reason": f"Face verification failed (distance: {face_distance:.3f})", "attempt_id": failed_attempt["attempt_id"]}
             
     except HTTPException:
         raise
@@ -351,13 +447,9 @@ async def register_face(
         face_embedding = selfie_encodings[0]
         embedding_list = face_embedding.tolist()
 
-        response = SupabaseDB.insert_or_update_face(
-            reg_no=reg_no,
-            name=name,
-            embedding=embedding_list
-        )
+        result = PostgresDB.insert_or_update_face(reg_no=reg_no, name=name, embedding=embedding_list)
 
-        if response.data:
+        if result:
             return {
                 "status": "success",
                 "message": "Face registration successful",
@@ -378,6 +470,36 @@ async def register_face(
             except:
                 pass
 
+@app.get("/faces/count")
+async def get_face_count():
+    try:
+        count = PostgresDB.get_face_count()
+        return {"count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting face count: {str(e)}")
+
+@app.get("/faces")
+async def get_all_faces():
+    try:
+        faces = PostgresDB.get_all_faces()
+        return {"faces": faces}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting faces: {str(e)}")
+
+@app.delete("/face/{reg_no}")
+async def delete_face(reg_no: str):
+    try:
+        deleted_count = PostgresDB.delete_face(reg_no)
+        if deleted_count > 0:
+            return {"status": "success", "message": f"Face with reg_no {reg_no} deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Face not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting face: {str(e)}")
+@app.get("/")
+def read_root():
+    return {"message": "Hello from FastAPI"}
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001, log_level="debug")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
