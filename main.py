@@ -177,7 +177,6 @@ async def approve_failed_attendance(
         mongo_db = Database.get_db()
         events_collection = mongo_db.EventDetails
         
-        # Find the event and the specific failed attempt
         event = events_collection.find_one({
             '_id': ObjectId(event_id) if len(event_id) == 24 else event_id
         })
@@ -188,7 +187,6 @@ async def approve_failed_attendance(
         failed_attempts = event.get('failed_attempts', [])
         failed_attempt = None
         
-        # Find the specific failed attempt
         for attempt in failed_attempts:
             if attempt.get('attempt_id') == failed_attempt_id:
                 failed_attempt = attempt
@@ -197,7 +195,6 @@ async def approve_failed_attendance(
         if not failed_attempt:
             raise HTTPException(status_code=404, detail="Failed attempt not found")
         
-        # Create attendee info from failed attempt
         current_time = datetime.datetime.utcnow()
         attendee_info = {
             "reg_no": failed_attempt.get('reg_no'),
@@ -208,7 +205,6 @@ async def approve_failed_attendance(
             "original_attempt_time": failed_attempt.get('timestamp')
         }
         
-        # Add to attendees and remove from failed_attempts
         events_collection.update_one(
             {'_id': ObjectId(event_id) if len(event_id) == 24 else event_id},
             {
@@ -315,7 +311,6 @@ async def register_attendance(
         selfie_encodings = face_recognition.face_encodings(selfie_image)
         
         if not selfie_encodings:
-            # Store failed attempt - no face detected, but return success
             await selfie.seek(0)
             image_data = await selfie.read()
             image_base64 = base64.b64encode(image_data).decode('utf-8')
@@ -323,7 +318,7 @@ async def register_attendance(
             failed_attempt = {
                 "attempt_id": str(uuid.uuid4()),
                 "reg_no": reg_no,
-                "name": "Unknown",  # We don't have name since face wasn't detected
+                "name": "Unknown", 
                 "timestamp": datetime.datetime.utcnow(),
                 "reason": "No face detected in selfie",
                 "selfie_data": image_base64,
@@ -343,7 +338,6 @@ async def register_attendance(
         
         face_record = PostgresDB.get_face_by_reg_no(reg_no)
         if not face_record:
-            # Store failed attempt - no registration found, but return success
             await selfie.seek(0)
             image_data = await selfie.read()
             image_base64 = base64.b64encode(image_data).decode('utf-8')
@@ -385,7 +379,6 @@ async def register_attendance(
             
             return {"status": "success", "message": "Attendance registered successfully", "info": attendee_info}
         else:
-            # Store failed attempt - face verification failed, but return success
             await selfie.seek(0)
             image_data = await selfie.read()
             image_base64 = base64.b64encode(image_data).decode('utf-8')
