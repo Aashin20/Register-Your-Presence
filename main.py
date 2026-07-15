@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
-from utils.db import Database, PostgresDB
+from utils.db import Database, SupabaseDB
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import date, time
@@ -21,10 +21,10 @@ import uuid
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Database.initialize()
-    PostgresDB.initialize()
+    SupabaseDB.initialize()
     yield
     Database.close()
-    PostgresDB.close()
+    SupabaseDB.close()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -341,7 +341,7 @@ async def register_attendance(
         
         selfie_encoding = selfie_encodings[0]
         
-        face_record = PostgresDB.get_face_by_reg_no(reg_no)
+        face_record = SupabaseDB.get_face_by_reg_no(reg_no)
         if not face_record:
             # Store failed attempt - no registration found, but return success
             await selfie.seek(0)
@@ -447,7 +447,7 @@ async def register_face(
         face_embedding = selfie_encodings[0]
         embedding_list = face_embedding.tolist()
 
-        result = PostgresDB.insert_or_update_face(reg_no=reg_no, name=name, embedding=embedding_list)
+        result = SupabaseDB.insert_or_update_face(reg_no=reg_no, name=name, embedding=embedding_list)
 
         if result:
             return {
@@ -473,7 +473,7 @@ async def register_face(
 @app.get("/faces/count")
 async def get_face_count():
     try:
-        count = PostgresDB.get_face_count()
+        count = SupabaseDB.get_face_count()
         return {"count": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting face count: {str(e)}")
@@ -481,7 +481,7 @@ async def get_face_count():
 @app.get("/faces")
 async def get_all_faces():
     try:
-        faces = PostgresDB.get_all_faces()
+        faces = SupabaseDB.get_all_faces()
         return {"faces": faces}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting faces: {str(e)}")
@@ -489,7 +489,7 @@ async def get_all_faces():
 @app.delete("/face/{reg_no}")
 async def delete_face(reg_no: str):
     try:
-        deleted_count = PostgresDB.delete_face(reg_no)
+        deleted_count = SupabaseDB.delete_face(reg_no)
         if deleted_count > 0:
             return {"status": "success", "message": f"Face with reg_no {reg_no} deleted successfully"}
         else:

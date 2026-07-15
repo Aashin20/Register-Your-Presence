@@ -1,27 +1,17 @@
+import logging
 import os
+from types import SimpleNamespace
+from typing import Optional
+
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float,text
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, scoped_session
-from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.sql import func
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
-import logging
+from supabase import Client, create_client
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-Base = declarative_base()
-
-class FaceEmbedding(Base):
-    __tablename__ = 'ctech_faculties'
-    
-    id = Column(Integer, primary_key=True)
-    reg_no = Column(String(50), unique=True, nullable=False, index=True)
-    name = Column(String(100), nullable=False)
-    embedding = Column(ARRAY(Float), nullable=False)
 
 class Database:
     client = None
@@ -55,111 +45,123 @@ class Database:
             cls.db = None
             logger.info("MongoDB connection closed")
 
-class PostgresDB:
-    engine = None
-    SessionLocal = None
+
+class SupabaseDB:
+    client: Optional[Client] = None
+    table_name = "ctech_faculties"
 
     @classmethod
     def initialize(cls):
-        if cls.engine is None:
-            postgres_url = f"postgresql://{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}@{os.getenv('POSTGRES_HOST', 'localhost')}:{os.getenv('POSTGRES_PORT', '5432')}/{os.getenv('POSTGRES_DB')}"
-            
-            cls.engine = create_engine(
-                postgres_url,
-                pool_size=20,
-                max_overflow=40,
-                pool_pre_ping=True,
-                pool_recycle=3600,
-                echo=False
-            )
-            
-            cls.SessionLocal = scoped_session(sessionmaker(
-                autocommit=False,
-                autoflush=False,
-                bind=cls.engine
-            ))
-            
+        if cls.client is None:
+            supabase_url = os.getenv("SUPABASE_URL")
+            supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_KEY")
+
+            if not supabase_url or not supabase_key:
+                raise RuntimeError("SUPABASE_URL and SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY) must be set")
+
+            cls.client = create_client(supabase_url, supabase_key)
+
             try:
-                with cls.engine.connect() as conn:
-                    conn.execute(text("SELECT 1"))
-                logger.info("Connected to PostgreSQL")
+                cls.client.table(cls.table_name).select("id").limit(1).execute()
+                logger.info("Connected to Supabase")
             except Exception as e:
-                logger.error(f"PostgreSQL connection failed: {e}")
+                logger.error(f"Supabase connection failed: {e}")
                 raise
 
     @classmethod
-    def get_session(cls):
-        if cls.SessionLocal is None:
+    def _ensure_client(cls):
+        if cls.client is None:
             cls.initialize()
-        return cls.SessionLocal()
+
+    @classmethod
+    def _row_to_face(cls, row):
+        if not row:
+            return None
+        return SimpleNamespace(**row)
+
+    @classmethod
+    def get_session(cls):
+        raise NotImplementedError("SupabaseDB does not use SQLAlchemy sessions")
 
     @classmethod
     def get_face_by_reg_no(cls, reg_no: str):
-        session = cls.get_session()
+        cls._ensure_client()
         try:
-            return session.query(FaceEmbedding).filter(FaceEmbedding.reg_no == reg_no).first()
-        finally:
-            session.close()
+            response = (
+                cls.client.table(cls.table_name)
+                .select("id, reg_no, name, embedding")
+                .eq("reg_no", reg_no)
+                .limit(1)
+                .execute()
+            )
+            rows = response.data or []
+            return cls._row_to_face(rows[0] if rows else None)
+        except Exception as e:
+            logger.error(f"Error in get_face_by_reg_no: {e}")
+            raise
 
     @classmethod
     def insert_or_update_face(cls, reg_no: str, name: str, embedding: list):
-        session = cls.get_session()
+        cls._ensure_client()
         try:
-            face = session.query(FaceEmbedding).filter(FaceEmbedding.reg_no == reg_no).first()
-            if face:
-                face.name = name
-                face.embedding = embedding
-                face.updated_at = func.now()
-            else:
-                face = FaceEmbedding(reg_no=reg_no, name=name, embedding=embedding)
-                session.add(face)
-            
-            session.commit()
-            return {'reg_no': face.reg_no, 'name': face.name, 'id': face.id}
+            cls.client.table(cls.table_name).upsert(
+                {
+                    "reg_no": reg_no,
+                    "name": name,
+                    "embedding": embedding,
+                },
+                on_conflict="reg_no",
+            ).execute()
+            return cls.get_face_by_reg_no(reg_no)
         except Exception as e:
-            session.rollback()
             logger.error(f"Error in insert_or_update_face: {e}")
             raise
-        finally:
-            session.close()
 
     @classmethod
     def get_all_faces(cls):
-        session = cls.get_session()
+        cls._ensure_client()
         try:
-            faces = session.query(FaceEmbedding.reg_no, FaceEmbedding.name).order_by(FaceEmbedding.name).all()
-            return [{'reg_no': face.reg_no, 'name': face.name} for face in faces]
-        finally:
-            session.close()
+            response = (
+                cls.client.table(cls.table_name)
+                .select("reg_no, name")
+                .order("name")
+                .execute()
+            )
+            return response.data or []
+        except Exception as e:
+            logger.error(f"Error in get_all_faces: {e}")
+            raise
 
     @classmethod
     def delete_face(cls, reg_no):
-        session = cls.get_session()
+        cls._ensure_client()
         try:
-            deleted_count = session.query(FaceEmbedding).filter(FaceEmbedding.reg_no == reg_no).delete()
-            session.commit()
-            return deleted_count
+            response = (
+                cls.client.table(cls.table_name)
+                .delete()
+                .eq("reg_no", reg_no)
+                .execute()
+            )
+            return len(response.data or [])
         except Exception as e:
-            session.rollback()
             logger.error(f"Error in delete_face: {e}")
             raise
-        finally:
-            session.close()
 
     @classmethod
     def get_face_count(cls):
-        session = cls.get_session()
+        cls._ensure_client()
         try:
-            return session.query(FaceEmbedding).count()
-        finally:
-            session.close()
+            response = cls.client.table(cls.table_name).select("id", count="exact").execute()
+            return response.count or 0
+        except Exception as e:
+            logger.error(f"Error in get_face_count: {e}")
+            raise
 
     @classmethod
     def close(cls):
-        if cls.SessionLocal:
-            cls.SessionLocal.remove()
-        if cls.engine:
-            cls.engine.dispose()
-            cls.engine = None
-            cls.SessionLocal = None
-            logger.info("PostgreSQL connection closed")
+        if cls.client:
+            cls.client = None
+            logger.info("Supabase connection closed")
+
+
+PostgresDB = SupabaseDB

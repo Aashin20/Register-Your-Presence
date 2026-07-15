@@ -6,6 +6,6 @@ __pycache__
 env/
 venv/
 .env
-*.log
 .git
 .gitignore
+.DS_Store
